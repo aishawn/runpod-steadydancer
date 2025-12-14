@@ -1022,6 +1022,9 @@ def handler(job):
                 logger.info(f"节点584 (VHS_VideoCombine): 使用默认参数")
     elif use_steadydancer:
         # SteadyDancer workflow 节点配置
+        # 获取 shift 参数（SteadyDancer 使用）
+        shift = job_input.get("shift", 5.0)  # SteadyDancer 默认值
+        
         # 节点 76: LoadImage (参考图像)
         if "76" in prompt:
             if "widgets_values" in prompt["76"]:
