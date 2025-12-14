@@ -1,0 +1,1543 @@
+import runpod
+from runpod.serverless.utils import rp_upload
+import os
+import websocket
+import base64
+import json
+import uuid
+import logging
+import urllib.request
+import urllib.parse
+import binascii # Base64 에러 처리를 위해 import
+import subprocess
+import time
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+server_address = os.getenv('SERVER_ADDRESS', '127.0.0.1')
+client_id = str(uuid.uuid4())
+def to_nearest_multiple_of_16(value):
+    """주어진 값을 가장 가까운 16의 배수로 보정, 최소 16 보장"""
+    try:
+        numeric_value = float(value)
+    except Exception:
+        raise Exception(f"width/height 값이 숫자가 아닙니다: {value}")
+    adjusted = int(round(numeric_value / 16.0) * 16)
+    if adjusted < 16:
+        adjusted = 16
+    return adjusted
+def process_input(input_data, temp_dir, output_filename, input_type):
+    """입력 데이터를 처리하여 파일 경로를 반환하는 함수"""
+    if input_type == "path":
+        # 경로인 경우 그대로 반환
+        logger.info(f"📁 경로 입력 처리: {input_data}")
+        return input_data
+    elif input_type == "url":
+        # URL인 경우 다운로드
+        logger.info(f"🌐 URL 입력 처리: {input_data}")
+        os.makedirs(temp_dir, exist_ok=True)
+        file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
+        return download_file_from_url(input_data, file_path)
+    elif input_type == "base64":
+        # Base64인 경우 디코딩하여 저장
+        logger.info(f"🔢 Base64 입력 처리")
+        return save_base64_to_file(input_data, temp_dir, output_filename)
+    else:
+        raise Exception(f"지원하지 않는 입력 타입: {input_type}")
+
+        
+def download_file_from_url(url, output_path):
+    """URL에서 파일을 다운로드하는 함수"""
+    try:
+        # wget을 사용하여 파일 다운로드
+        result = subprocess.run([
+            'wget', '-O', output_path, '--no-verbose', url
+        ], capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            logger.info(f"✅ URL에서 파일을 성공적으로 다운로드했습니다: {url} -> {output_path}")
+            return output_path
+        else:
+            logger.error(f"❌ wget 다운로드 실패: {result.stderr}")
+            raise Exception(f"URL 다운로드 실패: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("❌ 다운로드 시간 초과")
+        raise Exception("다운로드 시간 초과")
+    except Exception as e:
+        logger.error(f"❌ 다운로드 중 오류 발생: {e}")
+        raise Exception(f"다운로드 중 오류 발생: {e}")
+
+
+def save_base64_to_file(base64_data, temp_dir, output_filename):
+    """Base64 데이터를 파일로 저장하는 함수"""
+    try:
+        # Base64 문자열 디코딩
+        decoded_data = base64.b64decode(base64_data)
+        
+        # 디렉토리가 존재하지 않으면 생성
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # 파일로 저장
+        file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
+        with open(file_path, 'wb') as f:
+            f.write(decoded_data)
+        
+        logger.info(f"✅ Base64 입력을 '{file_path}' 파일로 저장했습니다.")
+        return file_path
+    except (binascii.Error, ValueError) as e:
+        logger.error(f"❌ Base64 디코딩 실패: {e}")
+        raise Exception(f"Base64 디코딩 실패: {e}")
+    
+def queue_prompt(prompt, is_mega_model=False):
+    url = f"http://{server_address}:8188/prompt"
+    logger.info(f"Queueing prompt to: {url}")
+    if is_mega_model:
+        # RapidAIO Mega (V2.5).json 验证
+        if "597" in prompt and "widgets_values" in prompt["597"]:
+            image_path_check = prompt["597"]["widgets_values"][0] if prompt["597"]["widgets_values"] else None
+            logger.info(f"  节点597的image = {image_path_check}")
+        if "591" in prompt and "widgets_values" in prompt["591"]:
+            prompts_check = prompt["591"]["widgets_values"][0] if prompt["591"]["widgets_values"] else None
+            logger.info(f"  节点591的Multi_prompts = {prompts_check[:100] if prompts_check and len(prompts_check) > 100 else prompts_check}...")
+        if "572" in prompt and "widgets_values" in prompt["572"]:
+            widgets = prompt["572"]["widgets_values"]
+            logger.info(f"  节点572的strength = {widgets[3] if len(widgets) > 3 else 'N/A'} (I2V mode)")
+    else:
+        # 标准 workflow 验证
+        if "541" in prompt and "inputs" in prompt["541"]:
+            fun_or_fl2v = prompt["541"]["inputs"].get("fun_or_fl2v_model")
+            logger.info(f"  节点541的fun_or_fl2v_model = {fun_or_fl2v} (类型: {type(fun_or_fl2v).__name__})")
+        if "244" in prompt and "inputs" in prompt["244"]:
+            image_path_check = prompt["244"]["inputs"].get("image")
+            logger.info(f"  节点244的image = {image_path_check}")
+    
+    p = {"prompt": prompt, "client_id": client_id}
+    data = json.dumps(p).encode('utf-8')
+    req = urllib.request.Request(url, data=data)
+    req.add_header('Content-Type', 'application/json')
+    try:
+        response = urllib.request.urlopen(req)
+        return json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        logger.error(f"HTTP Error {e.code}: {e.reason}")
+        logger.error(f"Error response: {error_body}")
+        try:
+            error_json = json.loads(error_body)
+            logger.error(f"Error details: {json.dumps(error_json, indent=2)}")
+        except:
+            pass
+        raise Exception(f"ComfyUI API 错误 ({e.code}): {error_body}")
+
+def get_image(filename, subfolder, folder_type):
+    url = f"http://{server_address}:8188/view"
+    logger.info(f"Getting image from: {url}")
+    data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+    url_values = urllib.parse.urlencode(data)
+    with urllib.request.urlopen(f"{url}?{url_values}") as response:
+        return response.read()
+
+def get_history(prompt_id):
+    url = f"http://{server_address}:8188/history/{prompt_id}"
+    logger.info(f"Getting history from: {url}")
+    with urllib.request.urlopen(url) as response:
+        return json.loads(response.read())
+
+def get_videos(ws, prompt, is_mega_model=False):
+    prompt_id = queue_prompt(prompt, is_mega_model)['prompt_id']
+    output_videos = {}
+    error_info = None
+    
+    while True:
+        out = ws.recv()
+        if isinstance(out, str):
+            message = json.loads(out)
+            if message['type'] == 'executing':
+                data = message['data']
+                if data['node'] is None and data['prompt_id'] == prompt_id:
+                    break
+            elif message['type'] == 'execution_error':
+                # 捕获执行错误
+                error_data = message.get('data', {})
+                error_info = error_data.get('error', 'Unknown execution error')
+                error_type = error_data.get('type', '')
+                node_id = error_data.get('node_id', '')
+                
+                # 检查是否是 OOM 错误
+                if 'OutOfMemoryError' in str(error_info) or 'OOM' in str(error_info):
+                    logger.error(f"❌ GPU 内存不足 (OOM) 错误 - 节点: {node_id}, 类型: {error_type}")
+                    logger.error(f"错误详情: {error_info}")
+                    logger.error("建议: 1) 减小图像分辨率 (width/height) 2) 减少帧数 (length) 3) 缩短提示词长度")
+                else:
+                    logger.error(f"Execution error received - 节点: {node_id}, 类型: {error_type}, 错误: {error_info}")
+        else:
+            continue
+
+    history = get_history(prompt_id)[prompt_id]
+    
+    # 检查是否有错误信息
+    if 'error' in history:
+        error_info = history['error']
+        if isinstance(error_info, dict):
+            error_info = error_info.get('message', str(error_info))
+        
+        # 检查是否是 OOM 错误
+        error_str = str(error_info)
+        if 'OutOfMemoryError' in error_str or 'OOM' in error_str or 'allocation' in error_str.lower():
+            logger.error(f"❌ GPU 内存不足 (OOM) 错误")
+            logger.error(f"错误详情: {error_info}")
+            logger.error("建议解决方案:")
+            logger.error("  1. 减小图像分辨率 (width/height) - 当前值可能过大")
+            logger.error("  2. 减少视频帧数 (length) - 当前值可能过大")
+            logger.error("  3. 缩短提示词长度 - 过长的提示词会消耗更多内存")
+            logger.error("  4. 降低 batch_size (如果可配置)")
+            raise Exception(f"GPU 内存不足 (OOM): {error_info}. 请尝试减小分辨率、帧数或提示词长度。")
+        else:
+            logger.error(f"Error in history: {error_info}")
+            raise Exception(f"ComfyUI execution error: {error_info}")
+    
+    # 检查 outputs 是否存在
+    if 'outputs' not in history:
+        if error_info:
+            raise Exception(f"ComfyUI execution error: {error_info}")
+        raise Exception("No outputs found in execution history")
+    
+    for node_id in history['outputs']:
+        node_output = history['outputs'][node_id]
+        videos_output = []
+        # 支持多种视频输出格式：gifs (标准 workflow) 和 videos (VHS_VideoCombine)
+        video_list = None
+        if 'gifs' in node_output:
+            video_list = node_output['gifs']
+        elif 'videos' in node_output:
+            video_list = node_output['videos']
+        
+        if video_list:
+            for video in video_list:
+                # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩
+                if 'fullpath' in video:
+                    with open(video['fullpath'], 'rb') as f:
+                        video_data = base64.b64encode(f.read()).decode('utf-8')
+                    videos_output.append(video_data)
+                elif 'filename' in video:
+                    # 如果没有 fullpath，尝试使用 filename 和 subfolder
+                    subfolder = video.get('subfolder', '')
+                    folder_type = video.get('type', 'output')
+                    filename = video['filename']
+                    try:
+                        video_bytes = get_image(filename, subfolder, folder_type)
+                        video_data = base64.b64encode(video_bytes).decode('utf-8')
+                        videos_output.append(video_data)
+                    except Exception as e:
+                        logger.warning(f"无法读取视频文件 {filename}: {e}")
+        output_videos[node_id] = videos_output
+
+    return output_videos
+
+def get_available_models():
+    """获取 ComfyUI 中可用的模型列表"""
+    try:
+        url = f"http://{server_address}:8188/object_info"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            object_info = json.loads(response.read())
+            models = []
+            
+            # 首先尝试 WanVideoModelLoader（用于标准 workflow）
+            if "WanVideoModelLoader" in object_info:
+                loader_info = object_info["WanVideoModelLoader"]
+                # 尝试不同的返回格式
+                if "model" in loader_info:
+                    wan_models = loader_info["model"]
+                elif "input" in loader_info and "required" in loader_info["input"]:
+                    if "model" in loader_info["input"]["required"]:
+                        wan_models = loader_info["input"]["required"]["model"]
+                    else:
+                        wan_models = []
+                else:
+                    wan_models = []
+                
+                # 处理嵌套列表的情况
+                if wan_models and isinstance(wan_models, list) and len(wan_models) > 0:
+                    if isinstance(wan_models[0], list):
+                        wan_models = wan_models[0]
+                    wan_models = [m for m in wan_models if isinstance(m, str)]
+                    models.extend(wan_models)
+            
+            # 同时检查 CheckpointLoaderSimple（用于 RapidAIO Mega (V2.5).json）
+            if "CheckpointLoaderSimple" in object_info:
+                loader_info = object_info["CheckpointLoaderSimple"]
+                checkpoint_models = []
+                
+                # 调试：打印 CheckpointLoaderSimple 的结构
+                logger.debug(f"CheckpointLoaderSimple loader_info keys: {list(loader_info.keys())}")
+                
+                # 尝试多种方式获取模型列表
+                if "input" in loader_info:
+                    if "required" in loader_info["input"]:
+                        if "ckpt_name" in loader_info["input"]["required"]:
+                            checkpoint_models = loader_info["input"]["required"]["ckpt_name"]
+                            logger.debug(f"CheckpointLoaderSimple ckpt_name from required: {checkpoint_models}")
+                    # 也检查 optional
+                    if "optional" in loader_info["input"]:
+                        if "ckpt_name" in loader_info["input"]["optional"]:
+                            optional_models = loader_info["input"]["optional"]["ckpt_name"]
+                            logger.debug(f"CheckpointLoaderSimple ckpt_name from optional: {optional_models}")
+                
+                # 直接检查是否有 ckpt_name 字段
+                if "ckpt_name" in loader_info:
+                    checkpoint_models = loader_info["ckpt_name"]
+                    logger.debug(f"CheckpointLoaderSimple ckpt_name direct: {checkpoint_models}")
+                
+                # 处理嵌套列表的情况
+                if checkpoint_models and isinstance(checkpoint_models, list) and len(checkpoint_models) > 0:
+                    if isinstance(checkpoint_models[0], list):
+                        checkpoint_models = checkpoint_models[0]
+                    checkpoint_models = [m for m in checkpoint_models if isinstance(m, str)]
+                    models.extend(checkpoint_models)
+                    logger.info(f"CheckpointLoaderSimple 找到 {len(checkpoint_models)} 个模型: {checkpoint_models}")
+                else:
+                    logger.warning(f"CheckpointLoaderSimple 模型列表为空，可能模型不在标准路径中")
+            
+            # 去重
+            models = list(set(models))
+            
+            if models:
+                logger.info(f"可用模型列表: {models}")
+            return models if models else []
+    except Exception as e:
+        logger.warning(f"获取可用模型列表失败: {e}")
+        return []
+
+def update_model_in_prompt(prompt, node_id, available_models):
+    """更新 prompt 中指定节点的模型名称，如果模型不存在则使用第一个可用模型"""
+    if node_id not in prompt:
+        return False
+    
+    node = prompt[node_id]
+    if "inputs" not in node or "model" not in node["inputs"]:
+        return False
+    
+    current_model = node["inputs"]["model"]
+    logger.info(f"节点 {node_id} 配置文件中的模型: {current_model}")
+    
+    # 如果当前模型在可用列表中，不需要更新
+    if current_model in available_models:
+        logger.info(f"节点 {node_id} 使用配置文件中的模型: {current_model}")
+        return False
+    
+    # 优先选择 I2V 相关的模型（包含 I2V 关键字）
+    i2v_models = [m for m in available_models if "I2V" in m.upper() or "i2v" in m.lower()]
+    if i2v_models:
+        new_model = i2v_models[0]
+        logger.info(f"节点 {node_id} 模型更新: {current_model} -> {new_model} (配置文件中的模型不在可用列表中，已自动替换为 I2V 模型)")
+        node["inputs"]["model"] = new_model
+        return True
+    
+    # 如果没有 I2V 模型，使用第一个可用模型
+    if available_models:
+        new_model = available_models[0]
+        logger.info(f"节点 {node_id} 模型更新: {current_model} -> {new_model} (配置文件中的模型不在可用列表中，已自动替换为第一个可用模型)")
+        node["inputs"]["model"] = new_model
+        return True
+    
+    return False
+
+def load_workflow(workflow_path):
+    """加载并验证工作流JSON文件"""
+    if not os.path.exists(workflow_path):
+        raise FileNotFoundError(f"工作流文件不存在: {workflow_path}")
+    
+    file_size = os.path.getsize(workflow_path)
+    logger.info(f"加载工作流文件: {workflow_path} (大小: {file_size} 字节)")
+    
+    if file_size == 0:
+        raise ValueError(f"工作流文件为空: {workflow_path}")
+    
+    try:
+        with open(workflow_path, 'r', encoding='utf-8') as file:
+            content = file.read()
+            # 检查文件内容是否看起来像JSON（以{或[开头）
+            content_stripped = content.strip()
+            if not content_stripped.startswith(('{', '[')):
+                # 显示前500个字符以便调试
+                preview = content[:500] if len(content) > 500 else content
+                logger.error(f"文件内容不是有效的JSON格式。前500字符: {preview}")
+                raise ValueError(f"工作流文件不是有效的JSON格式: {workflow_path}")
+            
+            return json.loads(content)
+    except json.JSONDecodeError as e:
+        # 显示错误位置附近的内容
+        with open(workflow_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+            error_line = e.lineno - 1 if e.lineno > 0 else 0
+            start_line = max(0, error_line - 2)
+            end_line = min(len(lines), error_line + 3)
+            context = ''.join(lines[start_line:end_line])
+            logger.error(f"JSON解析错误 (行 {e.lineno}, 列 {e.colno}):\n{context}")
+        raise ValueError(f"工作流文件JSON格式错误: {workflow_path} - {str(e)}")
+    except Exception as e:
+        logger.error(f"加载工作流文件时发生错误: {workflow_path} - {str(e)}")
+        raise
+
+def ensure_model_in_checkpoints(model_name):
+    """确保模型文件在 checkpoints 目录中，如果不在则创建符号链接"""
+    model_name = os.path.basename(model_name)  # 只取文件名
+    
+    # 可能的模型路径
+    possible_paths = [
+        "/ComfyUI/models/diffusion_models/" + model_name,
+        "/workspace/models/" + model_name,
+        "/ComfyUI/models/checkpoints/" + model_name,
+    ]
+    
+    # 目标路径
+    target_path = "/ComfyUI/models/checkpoints/" + model_name
+    target_dir = "/ComfyUI/models/checkpoints"
+    
+    # 如果目标文件已存在，检查是否是有效的符号链接或文件
+    if os.path.exists(target_path):
+        # 检查是否是符号链接
+        if os.path.islink(target_path):
+            link_target = os.readlink(target_path)
+            if os.path.exists(link_target):
+                logger.info(f"模型文件符号链接已存在: {target_path} -> {link_target}")
+                return True
+            else:
+                logger.warning(f"符号链接目标不存在，将重新创建: {link_target}")
+                os.remove(target_path)
+        elif os.path.isfile(target_path):
+            logger.info(f"模型文件已存在于 checkpoints 目录: {target_path}")
+            return True
+    
+    # 确保目标目录存在
+    os.makedirs(target_dir, exist_ok=True)
+    
+    # 查找模型文件
+    source_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            source_path = path
+            logger.info(f"找到模型文件: {source_path}")
+            break
+    
+    if source_path:
+        try:
+            # 创建符号链接
+            if os.path.exists(target_path):
+                os.remove(target_path)  # 如果已存在，先删除
+            os.symlink(source_path, target_path)
+            logger.info(f"已创建符号链接: {target_path} -> {source_path}")
+            
+            # 等待一小段时间，让文件系统同步
+            time.sleep(0.5)
+            
+            # 验证符号链接是否创建成功
+            if os.path.exists(target_path) and os.path.islink(target_path):
+                logger.info(f"符号链接验证成功: {target_path}")
+                return True
+            else:
+                logger.warning(f"符号链接创建后验证失败，尝试复制文件")
+                # 如果符号链接验证失败，尝试复制文件
+                import shutil
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                shutil.copy2(source_path, target_path)
+                logger.info(f"已复制模型文件: {source_path} -> {target_path}")
+                return True
+        except Exception as e:
+            logger.warning(f"创建符号链接失败: {e}，尝试复制文件")
+            try:
+                # 如果符号链接失败，尝试复制文件
+                import shutil
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                shutil.copy2(source_path, target_path)
+                logger.info(f"已复制模型文件: {source_path} -> {target_path}")
+                return True
+            except Exception as e2:
+                logger.error(f"复制模型文件也失败: {e2}")
+                return False
+    else:
+        logger.warning(f"未找到模型文件: {model_name}，在以下路径中查找: {possible_paths}")
+        return False
+
+def handler(job):
+    """
+    处理视频生成任务
+    
+    支持多提示词模式生成更长视频（基于 Hugging Face 讨论）:
+    - 提示词可以是字符串（用换行符分隔）或数组
+    - 每个提示词生成一个 batch，最终拼接成完整视频
+    - 对于 MEGA 模型：使用最后 12 帧作为下一个 batch 的指导，保持角色一致性
+    - 总视频长度 = length (每个 batch 的帧数) × 提示词数量
+    - 例如：length=81 (约5秒), 4个提示词 = 约20秒视频
+    
+    参考: https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne/discussions/100
+    """
+    job_input = job.get("input", {})
+
+    # 记录job_input，但排除base64数据以避免日志过长
+    log_input = {k: v for k, v in job_input.items() if k not in ["image_base64", "end_image_base64"]}
+    if "image_base64" in job_input:
+        log_input["image_base64"] = f"<base64 data, length: {len(job_input['image_base64'])}>"
+    if "end_image_base64" in job_input:
+        log_input["end_image_base64"] = f"<base64 data, length: {len(job_input['end_image_base64'])}>"
+    logger.info(f"Received job input: {log_input}")
+    task_id = f"task_{uuid.uuid4()}"
+
+    # 이미지 입력 처리 (image_path, image_url, image_base64 중 하나만 사용)
+    image_path = None
+    if "image_path" in job_input:
+        image_path = process_input(job_input["image_path"], task_id, "input_image.jpg", "path")
+    elif "image_url" in job_input:
+        image_path = process_input(job_input["image_url"], task_id, "input_image.jpg", "url")
+    elif "image_base64" in job_input:
+        image_path = process_input(job_input["image_base64"], task_id, "input_image.jpg", "base64")
+    else:
+        # 기본값 사용
+        image_path = "/example_image.png"
+        logger.info("기본 이미지 파일을 사용합니다: /example_image.png")
+
+    # 엔드 이미지 입력 처리 (end_image_path, end_image_url, end_image_base64 중 하나만 사용)
+    end_image_path_local = None
+    if "end_image_path" in job_input:
+        end_image_path_local = process_input(job_input["end_image_path"], task_id, "end_image.jpg", "path")
+    elif "end_image_url" in job_input:
+        end_image_path_local = process_input(job_input["end_image_url"], task_id, "end_image.jpg", "url")
+    elif "end_image_base64" in job_input:
+        end_image_path_local = process_input(job_input["end_image_base64"], task_id, "end_image.jpg", "base64")
+    
+    # LoRA 설정 확인 - 배열로 받아서 처리
+    lora_pairs = job_input.get("lora_pairs", [])
+    
+    # 최대 4개 LoRA까지 지원
+    lora_count = min(len(lora_pairs), 4)
+    if lora_count > len(lora_pairs):
+        logger.warning(f"LoRA 개수가 {len(lora_pairs)}개입니다. 최대 4개까지만 지원됩니다. 처음 4개만 사용합니다.")
+        lora_pairs = lora_pairs[:4]
+    
+    # 首先，确保 MEGA/AIO 模型文件在 checkpoints 目录中（如果存在）
+    # 这样 CheckpointLoaderSimple 就能找到模型
+    mega_model_name = "wan2.2-rapid-mega-aio-nsfw-v12.1.safetensors"
+    if os.path.exists(f"/ComfyUI/models/diffusion_models/{mega_model_name}"):
+        logger.info(f"检测到 MEGA/AIO 模型文件，确保其在 checkpoints 目录中")
+        if ensure_model_in_checkpoints(mega_model_name):
+            # 等待 ComfyUI 重新扫描模型目录（如果它支持动态扫描）
+            # 注意：ComfyUI 通常在启动时扫描，但我们可以等待一下
+            logger.info("等待 ComfyUI 识别新添加的模型文件...")
+            time.sleep(2)  # 等待 2 秒让 ComfyUI 有机会重新扫描
+    
+    # 获取可用模型列表，用于检测 MEGA/AIO 模型
+    available_models = get_available_models()
+    
+    # 检测是否为 MEGA/AIO 模型（支持 I2V 和 T2V 的 all-in-one 模型）
+    is_mega_model = False
+    if available_models:
+        for model_name in available_models:
+            model_name_lower = model_name.lower()
+            if "mega" in model_name_lower or "aio" in model_name_lower or "all-in-one" in model_name_lower or "allinone" in model_name_lower:
+                is_mega_model = True
+                mega_model_name = model_name
+                logger.info(f"检测到 MEGA/AIO 模型: {model_name}, 将使用 Rapid-AIO-Mega workflow")
+                
+                # 再次确保模型文件在 checkpoints 目录中（用于 CheckpointLoaderSimple）
+                ensure_model_in_checkpoints(model_name)
+                break
+    
+    # 워크플로우 파일 선택
+    # 检查是否使用 SteadyDancer workflow
+    use_steadydancer = job_input.get("use_steadydancer", False)
+    if use_steadydancer:
+        workflow_file = "/workflows/wanvideo_SteadyDancer_example_03.json"
+        logger.info(f"Using SteadyDancer workflow")
+    elif is_mega_model:
+        workflow_file = "/RapidAIO Mega (V2.5).json"
+        logger.info(f"Using Rapid-AIO-Mega workflow for MEGA/AIO model")
+    else:
+        workflow_file = "/new_Wan22_flf2v_api.json" if end_image_path_local else "/new_Wan22_api.json"
+        logger.info(f"Using {'FLF2V' if end_image_path_local else 'single'} workflow with {lora_count} LoRA pairs")
+    
+    workflow_data = load_workflow(workflow_file)
+    
+    # 提前获取 length 值，因为在转换 workflow 时可能会用到
+    length = job_input.get("length", 81)
+    
+    # 转换 workflow 格式：如果使用 nodes 数组格式，转换为节点 ID key 格式
+    # SteadyDancer workflow 和 MEGA workflow 都使用 nodes 数组格式
+    if "nodes" in workflow_data:
+        # RapidAIO Mega (V2.5).json 使用 nodes 数组格式，需要转换
+        prompt = {}
+        
+        # 预先计算 comfyui-logic 节点的值（避免依赖插件）
+        logic_node_values = {}
+        if is_mega_model:
+            # 节点592: Seconds/batch = length / 16
+            logic_node_values["592"] = int(length / 16.0)
+            # 节点593: Megapixel
+            logic_node_values["593"] = job_input.get("megapixel", 0.5)
+            # 节点585: Overlapping Frames
+            # MEGA 模型推荐使用 1 帧重叠，且 VHS_DuplicateImages 节点要求 multiply_by >= 1
+            logic_node_values["585"] = job_input.get("overlapping_frames", 1)
+            logger.info(f"预计算 logic 节点值: 592={logic_node_values['592']}, 593={logic_node_values['593']}, 585={logic_node_values['585']}")
+        
+        # 首先建立 link_id 到 [node_id, output_index] 的映射
+        links_map = {}
+        if "links" in workflow_data:
+            for link in workflow_data["links"]:
+                # link 格式: [link_id, source_node_id, source_output_index, target_node_id, target_input_index, type]
+                if len(link) >= 6:
+                    link_id = link[0]
+                    source_node_id = str(link[1])
+                    source_output_index = link[2]
+                    target_node_id = str(link[3])
+                    target_input_index = link[4]
+                    # 存储映射：link_id -> [source_node_id, source_output_index]
+                    links_map[link_id] = [source_node_id, source_output_index]
+        
+        for node in workflow_data["nodes"]:
+            node_id = str(node["id"])
+            
+            # 跳过 comfyui-logic 节点（592, 593, 585），直接内联它们的值
+            if node_id in logic_node_values:
+                logger.info(f"跳过 logic 节点 {node_id}，将直接内联其值")
+                continue
+            
+            # 跳过 Note 和 MarkdownNote 节点（注释节点，ComfyUI API 不支持）
+            node_type = node.get("type", "")
+            if node_type == "Note" or node_type == "MarkdownNote" or (isinstance(node_type, str) and (node_type.startswith("Note") or node_type.startswith("Markdown"))):
+                logger.info(f"跳过 {node_type} 节点 {node_id}（注释节点，不参与执行）")
+                continue
+            
+            # 创建符合 ComfyUI API 格式的节点对象
+            converted_node = {}
+            # 复制所有字段
+            for key, value in node.items():
+                if key != "id":  # 排除 id 字段
+                    if key == "inputs":
+                        # 转换 inputs 数组为 inputs 对象
+                        converted_inputs = {}
+                        # 获取节点的 widgets_values（如果存在）
+                        widgets_values = node.get("widgets_values", [])
+                        
+                        # widgets_values 可能是列表或字典
+                        # 如果是字典（如 VHS_VideoCombine），需要按 input 名称匹配
+                        # 如果是列表，按顺序匹配有 widget 的 inputs
+                        widgets_values_is_dict = isinstance(widgets_values, dict)
+                        
+                        if not widgets_values_is_dict:
+                            # 确保是列表
+                            if not isinstance(widgets_values, list):
+                                widgets_values = []
+                        
+                        # widgets_values 按 inputs 顺序包含所有有 widget 的输入值（不管是否有 link）
+                        # 需要按 inputs 顺序遍历，但只对有 widget 的输入从 widgets_values 获取值
+                        widget_index = 0
+                        if isinstance(value, list):
+                            for input_index, input_item in enumerate(value):
+                                if isinstance(input_item, dict) and "name" in input_item:
+                                    input_name = input_item["name"]
+                                    has_widget = "widget" in input_item
+                                    has_link = "link" in input_item and input_item["link"] is not None
+                                    
+                                    if has_link:
+                                        # 如果有 link，转换为 [node_id, output_index] 格式
+                                        link_id = input_item["link"]
+                                        if link_id in links_map:
+                                            source_node_id, source_output_index = links_map[link_id]
+                                            # 如果源节点是 logic 节点，直接使用计算的值
+                                            if source_node_id in logic_node_values:
+                                                converted_inputs[input_name] = logic_node_values[source_node_id]
+                                                logger.info(f"节点{node_id}.{input_name}: 内联 logic 节点{source_node_id}的值 = {logic_node_values[source_node_id]}")
+                                            else:
+                                                converted_inputs[input_name] = [source_node_id, source_output_index]
+                                        else:
+                                            # 如果找不到 link，保持原值或设为 None
+                                            converted_inputs[input_name] = None
+                                        # 如果有 widget，需要跳过 widgets_values 中的对应值（仅当是列表时）
+                                        if not widgets_values_is_dict and has_widget and widget_index < len(widgets_values):
+                                            widget_index += 1
+                                    else:
+                                        # 如果没有 link，尝试从 value 字段或 widgets_values 获取值
+                                        if "value" in input_item:
+                                            converted_inputs[input_name] = input_item["value"]
+                                        elif has_widget:
+                                            # 从 widgets_values 获取值
+                                            widget_value = None
+                                            if widgets_values_is_dict:
+                                                # 字典模式：按名称匹配
+                                                widget_value = widgets_values.get(input_name)
+                                            elif widget_index < len(widgets_values):
+                                                # 列表模式：按顺序匹配
+                                                widget_value = widgets_values[widget_index]
+                                                widget_index += 1
+                                            
+                                            # 跳过 null 值（可能是可选输入）
+                                            if widget_value is not None:
+                                                converted_inputs[input_name] = widget_value
+                                        # 如果没有值，不设置（可能是可选输入）
+                        converted_node["inputs"] = converted_inputs
+                    else:
+                        converted_node[key] = value
+            # 将 type 字段转换为 class_type（ComfyUI API 需要）
+            if "type" in converted_node:
+                node_type = converted_node["type"]
+                # 检查节点类型是否包含管道符（命名空间），如 "MathExpression|pysssss"
+                if "|" in node_type:
+                    # 如果包含管道符，直接使用
+                    converted_node["class_type"] = node_type
+                else:
+                    # 如果不包含管道符，检查是否有properties中的cnr_id
+                    properties = converted_node.get("properties", {})
+                    cnr_id = properties.get("cnr_id")
+                    if cnr_id:
+                        # 尝试使用 "节点类型|插件ID" 格式
+                        # 但ComfyUI API通常只需要节点类型名称，不需要插件ID
+                        converted_node["class_type"] = node_type
+                    else:
+                        converted_node["class_type"] = node_type
+                # 保留 type 字段（某些情况下可能需要）
+            # 确保节点有 class_type 字段（ComfyUI API 必需）
+            if "class_type" not in converted_node:
+                if "type" in converted_node:
+                    converted_node["class_type"] = converted_node["type"]
+                else:
+                    logger.warning(f"节点 {node_id} 缺少 type 和 class_type 字段")
+            prompt[node_id] = converted_node
+        logger.info("已转换 nodes 数组格式为节点 ID key 格式")
+    else:
+        # new_Wan22_api.json 使用节点 ID key 格式
+        prompt = workflow_data
+    
+    # 更新模型名称（仅对标准 workflow）
+    if not is_mega_model and available_models:
+        # 更新节点 122 和 549 的模型名称（如果存在）
+        update_model_in_prompt(prompt, "122", available_models)
+        update_model_in_prompt(prompt, "549", available_models)
+    elif is_mega_model and available_models:
+        # 对于 RapidAIO Mega (V2.5).json，更新节点 574 (CheckpointLoaderSimple) 的模型
+        if "574" in prompt and "widgets_values" in prompt["574"]:
+            current_model = prompt["574"]["widgets_values"][0] if prompt["574"]["widgets_values"] else ""
+            # 查找 MEGA/AIO 模型
+            mega_models = [m for m in available_models if "mega" in m.lower() or "aio" in m.lower() or "all-in-one" in m.lower() or "allinone" in m.lower()]
+            if mega_models:
+                new_model = mega_models[0]
+                if current_model != new_model:
+                    prompt["574"]["widgets_values"][0] = new_model
+                    logger.info(f"节点 574 模型更新: {current_model} -> {new_model}")
+            elif available_models:
+                # 如果没有找到 MEGA 模型，使用第一个可用模型
+                new_model = available_models[0]
+                if current_model != new_model:
+                    prompt["574"]["widgets_values"][0] = new_model
+                    logger.info(f"节点 574 模型更新: {current_model} -> {new_model}")
+    
+    # MEGA v12 推荐配置（根据 Hugging Face: https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne）
+    # - Steps: 4 (推荐值，保持向后兼容允许自定义)
+    # - CFG: 1.0 (推荐值)
+    # - Sampler: euler_a (推荐，替代之前的 ipndm)
+    # - Scheduler: beta (推荐，替代之前的 sgm_uniform)
+    steps = job_input.get("steps", 4)
+    seed = job_input.get("seed", 42)
+    cfg = job_input.get("cfg", 1.0)
+    # 允许用户自定义 sampler 和 scheduler（保持向后兼容）
+    sampler_name = job_input.get("sampler", "euler_a")
+    scheduler = job_input.get("scheduler", "beta")
+    
+    # 支持多提示词输入（用于生成更长视频）
+    # 可以是字符串（用换行符分隔）或数组
+    prompt_input = job_input.get("prompt", "running man, grab the gun")
+    if isinstance(prompt_input, list):
+        # 如果是数组，用换行符连接
+        positive_prompt = "\n".join(str(p) for p in prompt_input if p)
+    elif isinstance(prompt_input, str):
+        # 如果是字符串，直接使用（可能包含换行符）
+        positive_prompt = prompt_input
+    else:
+        positive_prompt = str(prompt_input)
+    
+    # 计算提示词数量（用于日志和验证）
+    prompt_lines = [line.strip() for line in positive_prompt.split("\n") if line.strip()]
+    prompt_count = len(prompt_lines)
+    if prompt_count > 1:
+        # 根据 Hugging Face 讨论：总视频长度 = length * prompt_count
+        # length 是每个 batch 的帧数
+        total_frames = length * prompt_count
+        # 转换为秒数（假设 16fps）
+        total_seconds = total_frames / 16.0
+        logger.info(f"📹 多提示词模式: {prompt_count} 个提示词，每个 batch {length} 帧，总长度约 {total_seconds:.1f} 秒 ({total_frames} 帧)")
+        logger.info(f"提示词列表: {[p[:50] + '...' if len(p) > 50 else p for p in prompt_lines]}")
+    
+    negative_prompt = job_input.get("negative_prompt", "")
+    
+    # 提示词长度检查 - 过长的提示词可能导致 OOM
+    max_prompt_length = 500  # 建议最大长度（单个提示词）
+    if prompt_count > 1:
+        # 多提示词模式：检查每个提示词的长度
+        for i, prompt_line in enumerate(prompt_lines):
+            if len(prompt_line) > max_prompt_length:
+                logger.warning(f"⚠️ 提示词 {i+1}/{prompt_count} 长度 ({len(prompt_line)} 字符) 超过建议值 ({max_prompt_length} 字符)")
+    else:
+        # 单提示词模式：检查总长度
+        if len(positive_prompt) > max_prompt_length:
+            logger.warning(f"⚠️ 提示词长度 ({len(positive_prompt)} 字符) 超过建议值 ({max_prompt_length} 字符)，可能导致 GPU 内存不足")
+            logger.warning(f"提示词前100字符: {positive_prompt[:100]}...")
+    
+    # 해상도(폭/높이) 16배수 보정
+    original_width = job_input.get("width", 480)
+    original_height = job_input.get("height", 832)
+    adjusted_width = to_nearest_multiple_of_16(original_width)
+    adjusted_height = to_nearest_multiple_of_16(original_height)
+    if adjusted_width != original_width:
+        logger.info(f"Width adjusted to nearest multiple of 16: {original_width} -> {adjusted_width}")
+    if adjusted_height != original_height:
+        logger.info(f"Height adjusted to nearest multiple of 16: {original_height} -> {adjusted_height}")
+    
+    if is_mega_model:
+        # RapidAIO Mega (V2.5).json workflow 节点配置
+        # V2.5 使用不同的节点结构，需要适配新的节点 ID
+        
+        # 节点597: LoadImage (起始图像)
+        if "597" in prompt:
+            if "widgets_values" in prompt["597"]:
+                prompt["597"]["widgets_values"][0] = image_path
+            # 确保 inputs 存在并设置 image
+            if "inputs" not in prompt["597"]:
+                prompt["597"]["inputs"] = {}
+            prompt["597"]["inputs"]["image"] = image_path
+            logger.info(f"节点597 (起始图像): {image_path}")
+        
+        # 节点591: CreaPrompt List - 多提示词输入
+        # widgets_values[0] = Multi_prompts, [1] = prefix, [2] = suffix
+        if "591" in prompt:
+            if "widgets_values" in prompt["591"]:
+                widgets = prompt["591"]["widgets_values"]
+                # 设置多提示词（用换行符分隔）
+                widgets[0] = positive_prompt
+                # prefix 和 suffix 保持原值或设为空
+                if len(widgets) < 2:
+                    widgets.append("")  # prefix
+                if len(widgets) < 3:
+                    widgets.append("")  # suffix
+            if "inputs" not in prompt["591"]:
+                prompt["591"]["inputs"] = {}
+            prompt["591"]["inputs"]["Multi_prompts"] = positive_prompt
+            if prompt_count > 1:
+                logger.info(f"节点591 (CreaPrompt List - 多提示词模式): {prompt_count} 个提示词")
+            else:
+                logger.info(f"节点591 (CreaPrompt List): {positive_prompt}")
+        
+        # 节点574: CheckpointLoaderSimple - widgets_values[0] 是模型名称
+        if "574" in prompt:
+            if "widgets_values" in prompt["574"] and prompt["574"]["widgets_values"]:
+                model_name = prompt["574"]["widgets_values"][0]
+            else:
+                # 如果没有 widgets_values，尝试从可用模型列表中获取
+                if available_models:
+                    model_name = available_models[0]
+                else:
+                    model_name = "wan2.2-rapid-mega-aio-nsfw-v12.1.safetensors"  # 默认值
+            
+            if "inputs" not in prompt["574"]:
+                prompt["574"]["inputs"] = {}
+            
+            # 获取 CheckpointLoaderSimple 的实际可用模型列表
+            checkpoint_models = []
+            try:
+                url = f"http://{server_address}:8188/object_info"
+                import urllib.request
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    object_info = json.loads(response.read())
+                    if "CheckpointLoaderSimple" in object_info:
+                        loader_info = object_info["CheckpointLoaderSimple"]
+                        if "input" in loader_info and "required" in loader_info["input"]:
+                            if "ckpt_name" in loader_info["input"]["required"]:
+                                checkpoint_models = loader_info["input"]["required"]["ckpt_name"]
+                                if isinstance(checkpoint_models, list) and len(checkpoint_models) > 0:
+                                    if isinstance(checkpoint_models[0], list):
+                                        checkpoint_models = checkpoint_models[0]
+                                    checkpoint_models = [m for m in checkpoint_models if isinstance(m, str)]
+                        logger.info(f"CheckpointLoaderSimple 可用模型列表: {checkpoint_models}")
+            except Exception as e:
+                logger.warning(f"获取 CheckpointLoaderSimple 模型列表失败: {e}")
+            
+            # 决定使用哪个模型名称
+            if checkpoint_models:
+                if model_name in checkpoint_models:
+                    final_model_name = model_name
+                    logger.info(f"使用模型: {final_model_name} (在 CheckpointLoaderSimple 列表中)")
+                else:
+                    final_model_name = checkpoint_models[0]
+                    logger.warning(f"模型 '{model_name}' 不在 CheckpointLoaderSimple 列表中，使用列表中的第一个: {final_model_name}")
+            else:
+                if model_name in available_models:
+                    final_model_name = model_name
+                    logger.warning(f"CheckpointLoaderSimple 模型列表为空，但模型 '{model_name}' 在 WanVideoModelLoader 中")
+                else:
+                    final_model_name = model_name
+                    logger.warning(f"CheckpointLoaderSimple 和 WanVideoModelLoader 都无法找到模型，使用默认名称: {final_model_name}")
+            
+            prompt["574"]["inputs"]["ckpt_name"] = final_model_name
+            logger.info(f"节点574 (模型): {prompt['574']['inputs']['ckpt_name']}")
+        
+        # 节点592, 593, 585 (comfyui-logic) 已在转换时跳过并内联，这里不需要处理
+        
+        # 节点595: PrimitiveString (Filename) - 文件名前缀
+        if "595" in prompt:
+            filename_prefix = job_input.get("filename_prefix", "rapid-mega-out/vid")
+            if "widgets_values" in prompt["595"]:
+                prompt["595"]["widgets_values"][0] = filename_prefix
+            if "inputs" not in prompt["595"]:
+                prompt["595"]["inputs"] = {}
+            prompt["595"]["inputs"]["value"] = filename_prefix
+            logger.info(f"节点595 (Filename): {filename_prefix}")
+        
+        # 节点561: easy forLoopStart - 循环开始
+        # total 会自动从节点 589 (StringFromList) 的 size 获取（提示词数量）
+        # 不需要手动设置，workflow 会自动处理
+        
+        # 节点566: CLIPTextEncode (正面提示词) - 在循环内，由节点 565 (StringFromList) 提供
+        # 不需要手动设置，workflow 会自动从提示词列表中提取
+        
+        # 节点567: CLIPTextEncode (负面提示词)
+        if "567" in prompt:
+            if "widgets_values" in prompt["567"]:
+                prompt["567"]["widgets_values"][0] = negative_prompt
+            if "inputs" not in prompt["567"]:
+                prompt["567"]["inputs"] = {}
+            prompt["567"]["inputs"]["text"] = negative_prompt
+            logger.info(f"节点567 (负面提示词): {negative_prompt}")
+        
+        # 节点576: WanVideoVACEStartToEndFrame - widgets_values[0]=num_frames, [1]=empty_frame_level
+        if "576" in prompt:
+            empty_frame_level = 1.0  # 默认值
+            if "widgets_values" in prompt["576"]:
+                widgets = prompt["576"]["widgets_values"]
+                widgets[0] = length  # num_frames
+                if len(widgets) < 2:
+                    widgets.append(1.0)  # empty_frame_level (默认 1.0)
+                empty_frame_level = widgets[1] if len(widgets) > 1 else 1.0
+            if "inputs" not in prompt["576"]:
+                prompt["576"]["inputs"] = {}
+            prompt["576"]["inputs"]["num_frames"] = length
+            prompt["576"]["inputs"]["empty_frame_level"] = empty_frame_level
+            logger.info(f"节点576 (VACE num_frames): {length}, empty_frame_level: {prompt['576']['inputs']['empty_frame_level']}")
+        
+        # 节点572: WanVaceToVideo - widgets_values[0]=width, [1]=height, [2]=length, [3]=strength, [4]=batch_size
+        if "572" in prompt:
+            batch_size = 1  # 默认值
+            if "widgets_values" in prompt["572"]:
+                widgets = prompt["572"]["widgets_values"]
+                widgets[0] = adjusted_width
+                widgets[1] = adjusted_height
+                widgets[2] = length
+                widgets[3] = 1  # strength = 1 for I2V
+                if len(widgets) < 5:
+                    widgets.append(1)  # batch_size
+                batch_size = widgets[4] if len(widgets) > 4 else 1
+            if "inputs" not in prompt["572"]:
+                prompt["572"]["inputs"] = {}
+            prompt["572"]["inputs"]["width"] = adjusted_width
+            prompt["572"]["inputs"]["height"] = adjusted_height
+            prompt["572"]["inputs"]["length"] = length
+            prompt["572"]["inputs"]["batch_size"] = batch_size
+            prompt["572"]["inputs"]["strength"] = 1  # I2V mode
+            logger.info(f"节点572 (WanVaceToVideo): width={adjusted_width}, height={adjusted_height}, length={length}, batch_size={prompt['572']['inputs']['batch_size']}, strength=1 (I2V)")
+        
+        # 节点562: ModelSamplingSD3 - widgets_values[0] 是 shift
+        if "562" in prompt:
+            shift_value = job_input.get("shift", 7.02)  # V2.5 默认值
+            if "widgets_values" in prompt["562"]:
+                prompt["562"]["widgets_values"][0] = shift_value
+            if "inputs" not in prompt["562"]:
+                prompt["562"]["inputs"] = {}
+            prompt["562"]["inputs"]["shift"] = shift_value
+            logger.info(f"节点562 (ModelSamplingSD3): shift={shift_value}")
+        
+        # 节点563: KSampler - widgets_values[0]=seed, [1]=control_after_generate, [2]=steps, [3]=cfg, [4]=sampler_name, [5]=scheduler, [6]=denoise
+        if "563" in prompt:
+            if "widgets_values" in prompt["563"]:
+                widgets = prompt["563"]["widgets_values"]
+                widgets[0] = seed
+                widgets[2] = steps
+                widgets[3] = cfg
+                # MEGA v12 推荐使用 euler_a/beta（根据 Hugging Face 文档）
+                if len(widgets) <= 4:
+                    widgets.extend([None] * (5 - len(widgets)))
+                if len(widgets) <= 5:
+                    widgets.extend([None] * (6 - len(widgets)))
+                # 如果用户没有指定或值为 "randomize"，使用推荐的默认值
+                if not widgets[4] or widgets[4] == "randomize":
+                    widgets[4] = sampler_name  # 使用 job_input 中的值或默认 euler_a
+                if not widgets[5]:
+                    widgets[5] = scheduler  # 使用 job_input 中的值或默认 beta
+            if "inputs" not in prompt["563"]:
+                prompt["563"]["inputs"] = {}
+            widgets = prompt["563"].get("widgets_values", [seed, "randomize", steps, cfg, sampler_name, scheduler, 1])
+            prompt["563"]["inputs"]["seed"] = seed
+            prompt["563"]["inputs"]["steps"] = steps
+            prompt["563"]["inputs"]["cfg"] = cfg
+            # 使用 job_input 中的值（已包含默认值 euler_a/beta）
+            prompt["563"]["inputs"]["sampler_name"] = widgets[4] if len(widgets) > 4 and widgets[4] else sampler_name
+            prompt["563"]["inputs"]["scheduler"] = widgets[5] if len(widgets) > 5 and widgets[5] else scheduler
+            prompt["563"]["inputs"]["denoise"] = widgets[6] if len(widgets) > 6 else 1.0
+            logger.info(f"节点563 (KSampler): seed={seed}, steps={steps}, cfg={cfg}, sampler={prompt['563']['inputs']['sampler_name']}, scheduler={prompt['563']['inputs']['scheduler']}, denoise={prompt['563']['inputs']['denoise']}")
+        
+        # 节点584: VHS_VideoCombine - 视频合并节点
+        if "584" in prompt:
+            # 确保 inputs 存在
+            if "inputs" not in prompt["584"]:
+                prompt["584"]["inputs"] = {}
+            
+            # 如果存在 widgets_values，将其转换为 inputs
+            if "widgets_values" in prompt["584"]:
+                widgets = prompt["584"]["widgets_values"]
+                # VHS_VideoCombine 需要的参数
+                if isinstance(widgets, dict):
+                    # 将 widgets_values 字典中的参数复制到 inputs
+                    for key, value in widgets.items():
+                        if key not in ["videopreview"]:  # 排除不需要的参数
+                            prompt["584"]["inputs"][key] = value
+                    logger.info(f"节点584 (VHS_VideoCombine): 已从 widgets_values 转换参数到 inputs")
+                else:
+                    # 如果 widgets_values 是数组，使用默认值
+                    prompt["584"]["inputs"]["frame_rate"] = 16
+                    prompt["584"]["inputs"]["loop_count"] = 0
+                    prompt["584"]["inputs"]["filename_prefix"] = job_input.get("filename_prefix", "rapid-mega-out/vid")
+                    prompt["584"]["inputs"]["format"] = "video/h264-mp4"
+                    prompt["584"]["inputs"]["save_output"] = True
+                    prompt["584"]["inputs"]["pingpong"] = False
+                    logger.info(f"节点584 (VHS_VideoCombine): 使用默认参数")
+            else:
+                # 如果没有 widgets_values，使用默认值
+                prompt["584"]["inputs"]["frame_rate"] = 16
+                prompt["584"]["inputs"]["loop_count"] = 0
+                prompt["584"]["inputs"]["filename_prefix"] = job_input.get("filename_prefix", "rapid-mega-out/vid")
+                prompt["584"]["inputs"]["format"] = "video/h264-mp4"
+                prompt["584"]["inputs"]["save_output"] = True
+                prompt["584"]["inputs"]["pingpong"] = False
+                logger.info(f"节点584 (VHS_VideoCombine): 使用默认参数")
+    elif use_steadydancer:
+        # SteadyDancer workflow 节点配置
+        # 节点 76: LoadImage (参考图像)
+        if "76" in prompt:
+            if "widgets_values" in prompt["76"]:
+                prompt["76"]["widgets_values"][0] = image_path
+            if "inputs" not in prompt["76"]:
+                prompt["76"]["inputs"] = {}
+            prompt["76"]["inputs"]["image"] = image_path
+            logger.info(f"节点76 (LoadImage): {image_path}")
+        
+        # 节点 75: VHS_LoadVideo (输入视频)
+        video_path = job_input.get("video_path") or job_input.get("video_url") or job_input.get("video_base64")
+        if video_path:
+            video_path_local = process_input(video_path, task_id, "input_video.mp4", 
+                                            "path" if "video_path" in job_input else ("url" if "video_url" in job_input else "base64"))
+            if "75" in prompt:
+                if "widgets_values" in prompt["75"]:
+                    widgets = prompt["75"]["widgets_values"]
+                    if isinstance(widgets, dict):
+                        widgets["video"] = video_path_local
+                    elif isinstance(widgets, list) and len(widgets) > 0:
+                        widgets[0] = video_path_local
+                if "inputs" not in prompt["75"]:
+                    prompt["75"]["inputs"] = {}
+                prompt["75"]["inputs"]["video"] = video_path_local
+                logger.info(f"节点75 (VHS_LoadVideo): {video_path_local}")
+        else:
+            logger.warning("⚠️ 未提供输入视频，SteadyDancer workflow 需要输入视频用于姿态检测")
+        
+        # 节点 22: WanVideoModelLoader (模型)
+        if "22" in prompt:
+            # 查找 SteadyDancer 模型（支持 GGUF）
+            model_name = None
+            if available_models:
+                # 优先查找包含 "steadydancer" 的模型
+                steadydancer_models = [m for m in available_models if "steadydancer" in m.lower()]
+                if steadydancer_models:
+                    model_name = steadydancer_models[0]
+                else:
+                    # 如果没有找到，查找包含 "gguf" 的模型
+                    gguf_models = [m for m in available_models if "gguf" in m.lower()]
+                    if gguf_models:
+                        model_name = gguf_models[0]
+                    elif available_models:
+                        # 如果都没有，使用第一个可用模型
+                        model_name = available_models[0]
+                        logger.warning(f"⚠️ 未找到 SteadyDancer 模型，使用第一个可用模型: {model_name}")
+            
+            if model_name:
+                if "widgets_values" in prompt["22"]:
+                    widgets = prompt["22"]["widgets_values"]
+                    if len(widgets) > 0:
+                        widgets[0] = model_name
+                if "inputs" not in prompt["22"]:
+                    prompt["22"]["inputs"] = {}
+                prompt["22"]["inputs"]["model"] = model_name
+                logger.info(f"节点22 (WanVideoModelLoader): {model_name}")
+            else:
+                logger.warning(f"⚠️ 未找到可用模型，可用模型列表: {available_models}")
+        
+        # 节点 38: WanVideoVAELoader (VAE 模型)
+        # workflow 中使用 "wanvideo/Wan2_1_VAE_bf16.safetensors"
+        # Dockerfile 中已创建符号链接支持此路径格式
+        if "38" in prompt:
+            # 使用 workflow 中的路径格式（wanvideo/ 前缀）
+            vae_model_name = "wanvideo/Wan2_1_VAE_bf16.safetensors"
+            if "widgets_values" in prompt["38"]:
+                widgets = prompt["38"]["widgets_values"]
+                if len(widgets) > 0:
+                    widgets[0] = vae_model_name
+            if "inputs" not in prompt["38"]:
+                prompt["38"]["inputs"] = {}
+            prompt["38"]["inputs"]["model_name"] = vae_model_name
+            logger.info(f"节点38 (WanVideoVAELoader): {vae_model_name}")
+        
+        # 节点 59: CLIPVisionLoader (CLIP Vision 模型)
+        # workflow 中使用 "clip_vision_h.safetensors"，路径正确
+        if "59" in prompt:
+            clip_vision_name = "clip_vision_h.safetensors"
+            if "widgets_values" in prompt["59"]:
+                widgets = prompt["59"]["widgets_values"]
+                if len(widgets) > 0:
+                    widgets[0] = clip_vision_name
+            if "inputs" not in prompt["59"]:
+                prompt["59"]["inputs"] = {}
+            prompt["59"]["inputs"]["clip_name"] = clip_vision_name
+            logger.info(f"节点59 (CLIPVisionLoader): {clip_vision_name}")
+        
+        # 节点 92: WanVideoTextEncodeCached (文本编码器)
+        # workflow 中使用 "umt5-xxl-enc-bf16.safetensors"，路径正确
+        if "92" in prompt:
+            if "widgets_values" in prompt["92"]:
+                widgets = prompt["92"]["widgets_values"]
+                # widgets_values[0] = model_name (umt5-xxl-enc-bf16.safetensors)
+                # widgets_values[1] = precision (bf16)
+                # widgets_values[2] = positive_prompt
+                # widgets_values[3] = negative_prompt
+                if len(widgets) >= 1:
+                    # 保持 model_name 不变（workflow 中已有正确值）
+                    pass
+                if len(widgets) >= 3:
+                    widgets[2] = positive_prompt  # positive_prompt
+                if len(widgets) >= 4:
+                    widgets[3] = negative_prompt  # negative_prompt
+            if "inputs" not in prompt["92"]:
+                prompt["92"]["inputs"] = {}
+            prompt["92"]["inputs"]["positive_prompt"] = positive_prompt
+            prompt["92"]["inputs"]["negative_prompt"] = negative_prompt
+            logger.info(f"节点92 (WanVideoTextEncodeCached): positive='{positive_prompt[:50]}...', negative='{negative_prompt[:50] if negative_prompt else ''}...'")
+        
+        # 节点 129: OnnxDetectionModelLoader (姿态检测模型)
+        if "129" in prompt:
+            vitpose_model = "onnx/vitpose_h_wholebody_model.onnx"
+            yolo_model = "onnx/yolov10m.onnx"
+            if "widgets_values" in prompt["129"]:
+                widgets = prompt["129"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = vitpose_model
+                if len(widgets) >= 2:
+                    widgets[1] = yolo_model
+            if "inputs" not in prompt["129"]:
+                prompt["129"]["inputs"] = {}
+            prompt["129"]["inputs"]["vitpose_model"] = vitpose_model
+            prompt["129"]["inputs"]["yolo_model"] = yolo_model
+            logger.info(f"节点129 (OnnxDetectionModelLoader): vitpose={vitpose_model}, yolo={yolo_model}")
+        
+        # 节点 63: WanVideoImageToVideoEncode (图像编码)
+        if "63" in prompt:
+            if "widgets_values" in prompt["63"]:
+                widgets = prompt["63"]["widgets_values"]
+                if len(widgets) >= 9:
+                    widgets[9] = adjusted_width  # width
+                if len(widgets) >= 10:
+                    widgets[10] = adjusted_height  # height
+                if len(widgets) >= 11:
+                    widgets[11] = length  # num_frames
+            if "inputs" not in prompt["63"]:
+                prompt["63"]["inputs"] = {}
+            prompt["63"]["inputs"]["width"] = adjusted_width
+            prompt["63"]["inputs"]["height"] = adjusted_height
+            prompt["63"]["inputs"]["num_frames"] = length
+            logger.info(f"节点63 (WanVideoImageToVideoEncode): width={adjusted_width}, height={adjusted_height}, num_frames={length}")
+        
+        # 节点 87: WanVideoContextOptions (上下文选项)
+        if "87" in prompt:
+            context_frames = job_input.get("context_frames", 81)
+            context_stride = job_input.get("context_stride", 4)
+            context_overlap = job_input.get("context_overlap", 16)
+            if "widgets_values" in prompt["87"]:
+                widgets = prompt["87"]["widgets_values"]
+                if len(widgets) >= 2:
+                    widgets[1] = context_frames
+                if len(widgets) >= 3:
+                    widgets[2] = context_stride
+                if len(widgets) >= 4:
+                    widgets[3] = context_overlap
+            if "inputs" not in prompt["87"]:
+                prompt["87"]["inputs"] = {}
+            prompt["87"]["inputs"]["context_frames"] = context_frames
+            prompt["87"]["inputs"]["context_stride"] = context_stride
+            prompt["87"]["inputs"]["context_overlap"] = context_overlap
+            logger.info(f"节点87 (WanVideoContextOptions): context_frames={context_frames}, context_stride={context_stride}, context_overlap={context_overlap}")
+        
+        # 节点 119: WanVideoSamplerSettings (采样器设置)
+        if "119" in prompt:
+            if "widgets_values" in prompt["119"]:
+                widgets = prompt["119"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = steps
+                if len(widgets) >= 2:
+                    widgets[1] = cfg
+                if len(widgets) >= 3:
+                    widgets[2] = shift
+                if len(widgets) >= 4:
+                    widgets[3] = seed
+            if "inputs" not in prompt["119"]:
+                prompt["119"]["inputs"] = {}
+            prompt["119"]["inputs"]["steps"] = steps
+            prompt["119"]["inputs"]["cfg"] = cfg
+            prompt["119"]["inputs"]["shift"] = shift
+            prompt["119"]["inputs"]["seed"] = seed
+            logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}")
+        
+        # 节点 122: WanVideoScheduler (调度器)
+        if "122" in prompt:
+            if "widgets_values" in prompt["122"]:
+                widgets = prompt["122"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = scheduler
+                if len(widgets) >= 2:
+                    widgets[1] = steps
+                if len(widgets) >= 3:
+                    widgets[2] = shift
+            if "inputs" not in prompt["122"]:
+                prompt["122"]["inputs"] = {}
+            prompt["122"]["inputs"]["scheduler"] = scheduler
+            prompt["122"]["inputs"]["steps"] = steps
+            prompt["122"]["inputs"]["shift"] = shift
+            logger.info(f"节点122 (WanVideoScheduler): scheduler={scheduler}, steps={steps}, shift={shift}")
+        
+        # 节点 123: PrimitiveNode (cfg)
+        if "123" in prompt:
+            if "widgets_values" in prompt["123"]:
+                prompt["123"]["widgets_values"][0] = cfg
+            if "inputs" not in prompt["123"]:
+                prompt["123"]["inputs"] = {}
+            prompt["123"]["inputs"]["cfg"] = cfg
+        
+        # 节点 124: PrimitiveNode (seed)
+        if "124" in prompt:
+            if "widgets_values" in prompt["124"]:
+                prompt["124"]["widgets_values"][0] = seed
+            if "inputs" not in prompt["124"]:
+                prompt["124"]["inputs"] = {}
+            prompt["124"]["inputs"]["seed"] = seed
+        
+        # 节点 83: VHS_VideoCombine (输出视频)
+        if "83" in prompt:
+            if "widgets_values" in prompt["83"]:
+                widgets = prompt["83"]["widgets_values"]
+                if isinstance(widgets, dict):
+                    widgets["frame_rate"] = job_input.get("frame_rate", 24)
+                    widgets["filename_prefix"] = job_input.get("filename_prefix", "WanVideoWrapper_SteadyDancer")
+                    widgets["format"] = job_input.get("format", "video/h264-mp4")
+                    widgets["save_output"] = True
+            if "inputs" not in prompt["83"]:
+                prompt["83"]["inputs"] = {}
+            prompt["83"]["inputs"]["frame_rate"] = job_input.get("frame_rate", 24)
+            prompt["83"]["inputs"]["filename_prefix"] = job_input.get("filename_prefix", "WanVideoWrapper_SteadyDancer")
+            prompt["83"]["inputs"]["format"] = job_input.get("format", "video/h264-mp4")
+            prompt["83"]["inputs"]["save_output"] = True
+            logger.info(f"节点83 (VHS_VideoCombine): frame_rate={job_input.get('frame_rate', 24)}, filename_prefix={job_input.get('filename_prefix', 'WanVideoWrapper_SteadyDancer')}")
+        
+        # 节点 130: PoseDetectionOneToAllAnimation (姿态检测)
+        if "130" in prompt:
+            pose_width = job_input.get("width", 832)
+            pose_height = job_input.get("height", 480)
+            align_to = job_input.get("align_to", "ref")
+            draw_face_points = job_input.get("draw_face_points", "weak")
+            draw_head = job_input.get("draw_head", "full")
+            if "widgets_values" in prompt["130"]:
+                widgets = prompt["130"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = pose_width
+                if len(widgets) >= 2:
+                    widgets[1] = pose_height
+                if len(widgets) >= 3:
+                    widgets[2] = align_to
+                if len(widgets) >= 4:
+                    widgets[3] = draw_face_points
+                if len(widgets) >= 5:
+                    widgets[4] = draw_head
+            if "inputs" not in prompt["130"]:
+                prompt["130"]["inputs"] = {}
+            prompt["130"]["inputs"]["width"] = pose_width
+            prompt["130"]["inputs"]["height"] = pose_height
+            prompt["130"]["inputs"]["align_to"] = align_to
+            prompt["130"]["inputs"]["draw_face_points"] = draw_face_points
+            prompt["130"]["inputs"]["draw_head"] = draw_head
+            logger.info(f"节点130 (PoseDetectionOneToAllAnimation): width={pose_width}, height={pose_height}, align_to={align_to}, draw_face_points={draw_face_points}, draw_head={draw_head}")
+    else:
+        # 标准 workflow (new_Wan22_api.json) 节点配置
+        prompt["244"]["inputs"]["image"] = image_path
+        prompt["541"]["inputs"]["num_frames"] = length
+        # 当有输入图像时，必须设置 fun_or_fl2v_model 为 true 以支持 I2V 模式
+        if image_path and "541" in prompt and "inputs" in prompt["541"]:
+            # 强制设置为布尔值 True，确保JSON序列化正确
+            prompt["541"]["inputs"]["fun_or_fl2v_model"] = True
+            # 验证设置是否成功
+            actual_value = prompt["541"]["inputs"].get("fun_or_fl2v_model")
+            logger.info(f"已设置 fun_or_fl2v_model = {actual_value} (类型: {type(actual_value).__name__}) 以支持 I2V 模式")
+        prompt["135"]["inputs"]["positive_prompt"] = positive_prompt
+        prompt["220"]["inputs"]["seed"] = seed
+        prompt["540"]["inputs"]["seed"] = seed
+        prompt["540"]["inputs"]["cfg"] = cfg
+        prompt["235"]["inputs"]["value"] = adjusted_width
+        prompt["236"]["inputs"]["value"] = adjusted_height
+    
+    if not is_mega_model and not use_steadydancer:
+        # 标准 workflow 的 context_overlap 和 steps 设置
+        # context_overlap 动态调整：确保不超过总帧数，且对短视频使用更保守的值
+        user_overlap = job_input.get("context_overlap")
+        if user_overlap is not None:
+            # 用户指定了值，但需要确保不超过总帧数
+            context_overlap = min(user_overlap, length - 1) if length > 1 else 0
+            if user_overlap != context_overlap:
+                logger.warning(f"context_overlap {user_overlap} exceeds length {length}, adjusted to {context_overlap}")
+        else:
+            # 自动计算：对于短视频使用更小的值
+            if length < 50:
+                # 短视频：最多 30% 或 0，取较小值
+                context_overlap = min(0, max(1, int(length * 0.3)))
+            else:
+                # 长视频：最多 60% 或 48，取较小值
+                context_overlap = min(48, max(0, int(length * 0.6)))
+            logger.info(f"Auto-calculated context_overlap: {context_overlap} for length: {length}")
+        
+        if "498" in prompt:
+            prompt["498"]["inputs"]["context_overlap"] = context_overlap
+        
+        # step 설정 적용
+        # 节点 569: steps (INTConstant) - 默认值是 4
+        if "569" in prompt:
+            prompt["569"]["inputs"]["value"] = steps
+            logger.info(f"节点569 (Steps): {steps}")
+        # 节点 575: start_step (INTConstant) - 默认值是 4
+        if "575" in prompt:
+            # start_step 应该是 steps 的一部分，默认保持为 4
+            start_step = 4 if steps >= 4 else steps
+            prompt["575"]["inputs"]["value"] = start_step
+            logger.info(f"节点575 (StartStep): {start_step}")
+
+        # 엔드 이미지가 있는 경우 617번 노드에 경로 적용 (FLF2V 전용)
+        if end_image_path_local and "617" in prompt:
+            prompt["617"]["inputs"]["image"] = end_image_path_local
+    
+    # LoRA 설정 적용
+    if lora_count > 0:
+        if is_mega_model:
+            # RapidAIO Mega (V2.5).json 可能不支持 LoRA，记录警告
+            logger.warning(f"Rapid-AIO-Mega workflow 不支持 LoRA 设置，已忽略 {lora_count} 个 LoRA pairs")
+        else:
+            # 标准 workflow 的 LoRA 设置 - HIGH LoRA는 노드 279, LOW LoRA는 노드 553
+            high_lora_node_id = "279"
+            low_lora_node_id = "553"
+            
+            # 입력받은 LoRA pairs 적용 (lora_1부터 시작)
+            for i, lora_pair in enumerate(lora_pairs):
+                if i < 4:  # 최대 4개까지만
+                    lora_high = lora_pair.get("high")
+                    lora_low = lora_pair.get("low")
+                    lora_high_weight = lora_pair.get("high_weight", 1.0)
+                    lora_low_weight = lora_pair.get("low_weight", 1.0)
+                    
+                    # HIGH LoRA 설정 (노드 279번, lora_0부터 시작)
+                    if lora_high and high_lora_node_id in prompt:
+                        prompt[high_lora_node_id]["inputs"][f"lora_{i}"] = lora_high
+                        prompt[high_lora_node_id]["inputs"][f"strength_{i}"] = lora_high_weight
+                        logger.info(f"LoRA {i+1} HIGH applied to node 279: {lora_high} with weight {lora_high_weight}")
+                    
+                    # LOW LoRA 설정 (노드 553번, lora_0부터 시작)
+                    if lora_low and low_lora_node_id in prompt:
+                        prompt[low_lora_node_id]["inputs"][f"lora_{i}"] = lora_low
+                        prompt[low_lora_node_id]["inputs"][f"strength_{i}"] = lora_low_weight
+                        logger.info(f"LoRA {i+1} LOW applied to node 553: {lora_low} with weight {lora_low_weight}")
+
+    # 验证关键参数设置 - 无条件输出验证信息
+    logger.info("=" * 60)
+    logger.info("验证关键节点配置:")
+    
+    if use_steadydancer:
+        # SteadyDancer workflow 验证
+        if "76" in prompt:
+            if "inputs" in prompt["76"]:
+                image_in_76 = prompt["76"]["inputs"].get("image")
+                logger.info(f"✓ 节点76 (LoadImage): {image_in_76}")
+            else:
+                logger.warning("✗ 节点76 缺少 inputs")
+        if "75" in prompt:
+            if "inputs" in prompt["75"]:
+                video_in_75 = prompt["75"]["inputs"].get("video")
+                logger.info(f"✓ 节点75 (VHS_LoadVideo): {video_in_75}")
+            else:
+                logger.warning("✗ 节点75 缺少 inputs")
+        if "92" in prompt:
+            if "inputs" in prompt["92"]:
+                pos_prompt = prompt["92"]["inputs"].get("positive_prompt", "")
+                logger.info(f"✓ 节点92 (WanVideoTextEncodeCached): positive='{pos_prompt[:50] if pos_prompt else ''}...'")
+            else:
+                logger.warning("✗ 节点92 缺少 inputs")
+        if "22" in prompt:
+            if "inputs" in prompt["22"]:
+                model_in_22 = prompt["22"]["inputs"].get("model")
+                logger.info(f"✓ 节点22 (WanVideoModelLoader): {model_in_22}")
+            else:
+                logger.warning("✗ 节点22 缺少 inputs")
+        if "63" in prompt:
+            if "inputs" in prompt["63"]:
+                width_63 = prompt["63"]["inputs"].get("width")
+                height_63 = prompt["63"]["inputs"].get("height")
+                num_frames_63 = prompt["63"]["inputs"].get("num_frames")
+                logger.info(f"✓ 节点63 (WanVideoImageToVideoEncode): width={width_63}, height={height_63}, num_frames={num_frames_63}")
+            else:
+                logger.warning("✗ 节点63 缺少 inputs")
+        if "83" in prompt:
+            if "inputs" in prompt["83"]:
+                frame_rate_83 = prompt["83"]["inputs"].get("frame_rate")
+                filename_prefix_83 = prompt["83"]["inputs"].get("filename_prefix")
+                logger.info(f"✓ 节点83 (VHS_VideoCombine): frame_rate={frame_rate_83}, filename_prefix={filename_prefix_83}")
+            else:
+                logger.warning("✗ 节点83 缺少 inputs")
+        if "129" in prompt:
+            if "inputs" in prompt["129"]:
+                vitpose_129 = prompt["129"]["inputs"].get("vitpose_model")
+                yolo_129 = prompt["129"]["inputs"].get("yolo_model")
+                logger.info(f"✓ 节点129 (OnnxDetectionModelLoader): vitpose={vitpose_129}, yolo={yolo_129}")
+            else:
+                logger.warning("✗ 节点129 缺少 inputs")
+        if "38" in prompt:
+            if "inputs" in prompt["38"]:
+                vae_38 = prompt["38"]["inputs"].get("model_name")
+                logger.info(f"✓ 节点38 (WanVideoVAELoader): {vae_38}")
+            else:
+                logger.warning("✗ 节点38 缺少 inputs")
+        if "59" in prompt:
+            if "inputs" in prompt["59"]:
+                clip_59 = prompt["59"]["inputs"].get("clip_name")
+                logger.info(f"✓ 节点59 (CLIPVisionLoader): {clip_59}")
+            else:
+                logger.warning("✗ 节点59 缺少 inputs")
+        if "130" in prompt:
+            if "inputs" in prompt["130"]:
+                width_130 = prompt["130"]["inputs"].get("width")
+                height_130 = prompt["130"]["inputs"].get("height")
+                logger.info(f"✓ 节点130 (PoseDetectionOneToAllAnimation): width={width_130}, height={height_130}")
+            else:
+                logger.warning("✗ 节点130 缺少 inputs")
+    elif is_mega_model:
+        # RapidAIO Mega (V2.5).json 验证
+        if "597" in prompt and "widgets_values" in prompt["597"]:
+            image_in_597 = prompt["597"]["widgets_values"][0] if prompt["597"]["widgets_values"] else None
+            logger.info(f"✓ 节点597 (起始图像): {image_in_597}")
+        if "591" in prompt and "widgets_values" in prompt["591"]:
+            prompts_in_591 = prompt["591"]["widgets_values"][0] if prompt["591"]["widgets_values"] else None
+            logger.info(f"✓ 节点591 (CreaPrompt List): {prompts_in_591[:100] if prompts_in_591 and len(prompts_in_591) > 100 else prompts_in_591}...")
+        if "574" in prompt and "inputs" in prompt["574"]:
+            model_in_574 = prompt["574"]["inputs"].get("ckpt_name")
+            logger.info(f"✓ 节点574 (模型): {model_in_574}")
+        if "572" in prompt and "widgets_values" in prompt["572"]:
+            widgets = prompt["572"]["widgets_values"]
+            logger.info(f"✓ 节点572 (WanVaceToVideo): width={widgets[0]}, height={widgets[1]}, length={widgets[2]}, strength={widgets[3]} (I2V)")
+        if "576" in prompt and "widgets_values" in prompt["576"]:
+            num_frames_576 = prompt["576"]["widgets_values"][0] if prompt["576"]["widgets_values"] else None
+            logger.info(f"✓ 节点576 (VACE num_frames): {num_frames_576}")
+        if "563" in prompt and "widgets_values" in prompt["563"]:
+            widgets = prompt["563"]["widgets_values"]
+            logger.info(f"✓ 节点563 (KSampler): seed={widgets[0]}, steps={widgets[2]}, cfg={widgets[3]}, sampler={widgets[4] if len(widgets) > 4 else 'N/A'}")
+        if "584" in prompt:
+            if "inputs" in prompt["584"]:
+                inputs_584 = prompt["584"]["inputs"]
+                images_input = inputs_584.get("images")
+                logger.info(f"✓ 节点584 (VHS_VideoCombine): images={images_input}, frame_rate={inputs_584.get('frame_rate')}, format={inputs_584.get('format')}")
+            else:
+                logger.warning("✗ 节点584 缺少 inputs")
+    else:
+        # 标准 workflow 验证
+        if "244" in prompt:
+            if "inputs" in prompt["244"]:
+                image_in_244 = prompt["244"]["inputs"].get("image")
+                logger.info(f"✓ 节点244 (LoadImage): image = {image_in_244}")
+            else:
+                logger.warning("✗ 节点244 缺少 inputs")
+        else:
+            logger.warning("✗ 节点244 不存在")
+        
+        if "541" in prompt:
+            if "inputs" in prompt["541"]:
+                fun_or_fl2v_value = prompt["541"]["inputs"].get("fun_or_fl2v_model")
+                logger.info(f"✓ 节点541 (WanVideoImageToVideoEncode): fun_or_fl2v_model = {fun_or_fl2v_value} (类型: {type(fun_or_fl2v_value).__name__})")
+                if fun_or_fl2v_value != True:
+                    logger.warning(f"⚠ 警告: fun_or_fl2v_model 不是 True，实际值: {fun_or_fl2v_value}")
+                
+                num_frames = prompt["541"]["inputs"].get("num_frames")
+                logger.info(f"  - num_frames = {num_frames}")
+            else:
+                logger.warning("✗ 节点541 缺少 inputs")
+        else:
+            logger.warning("✗ 节点541 不存在")
+    
+    logger.info("=" * 60)
+    
+    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
+    logger.info(f"Connecting to WebSocket: {ws_url}")
+    
+    # 먼저 HTTP 연결이 가능한지 확인
+    http_url = f"http://{server_address}:8188/"
+    logger.info(f"Checking HTTP connection to: {http_url}")
+    
+    # HTTP 연결 확인 (최대 1분)
+    max_http_attempts = 180
+    for http_attempt in range(max_http_attempts):
+        try:
+            response = urllib.request.urlopen(http_url, timeout=5)
+            logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
+            if http_attempt == max_http_attempts - 1:
+                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+            time.sleep(1)
+    
+    ws = websocket.WebSocket()
+    # 웹소켓 연결 시도 (최대 3분)
+    max_attempts = int(180/5)  # 3분 (1초에 한 번씩 시도)
+    for attempt in range(max_attempts):
+        try:
+            ws.connect(ws_url)
+            logger.info(f"웹소켓 연결 성공 (시도 {attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
+            if attempt == max_attempts - 1:
+                raise Exception("웹소켓 연결 시간 초과 (3분)")
+            time.sleep(5)
+    try:
+        videos = get_videos(ws, prompt, is_mega_model or use_steadydancer)
+        ws.close()
+
+        # 이미지가 없는 경우 처리
+        for node_id in videos:
+            if videos[node_id]:
+                return {"video": videos[node_id][0]}
+        
+        return {"error": "비디오를를 찾을 수 없습니다."}
+    except Exception as e:
+        ws.close()
+        error_message = str(e)
+        logger.error(f"Video generation failed: {error_message}")
+        return {"error": error_message}
+
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
