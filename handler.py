@@ -652,6 +652,25 @@ def handler(job):
                         # PrimitiveNode 的值会在处理节点输入时直接使用，这里标记为特殊值
                         links_map[link_id] = ["__PRIMITIVE__", primitivenode_values[source_node_id]]
                         logger.info(f"链接 {link_id}: PrimitiveNode {source_node_id} 的值 = {primitivenode_values[source_node_id]}")
+                    # 如果源节点是 SetNode，找到 SetNode 的输入链接
+                    elif source_node_id in setnode_to_getnode_map:
+                        # SetNode 的输出链接，需要找到 SetNode 的输入源
+                        for setnode in workflow_data["nodes"]:
+                            if str(setnode["id"]) == source_node_id and "inputs" in setnode:
+                                for input_item in setnode.get("inputs", []):
+                                    if isinstance(input_item, dict) and "link" in input_item and input_item["link"] is not None:
+                                        # 找到 SetNode 的源链接
+                                        setnode_link_id = input_item["link"]
+                                        # 查找这个链接的源节点
+                                        for link_item in workflow_data.get("links", []):
+                                            if len(link_item) >= 6 and link_item[0] == setnode_link_id:
+                                                actual_source_id = str(link_item[1])
+                                                actual_source_output = link_item[2]
+                                                links_map[link_id] = [actual_source_id, actual_source_output]
+                                                logger.info(f"链接 {link_id}: SetNode {source_node_id} -> 实际源节点 {actual_source_id}")
+                                                break
+                                        break
+                                break
                     # 如果源节点是 GetNode，找到对应的 SetNode 的源
                     elif source_node_id in getnode_to_setnode_map:
                         setnode_id = getnode_to_setnode_map[source_node_id]
@@ -751,8 +770,26 @@ def handler(job):
                                                 logger.info(f"节点{node_id}.{input_name}: 使用 PrimitiveNode 的值 = {source_output_index}")
                                             # 如果源节点被跳过（GetNode/SetNode/Note等），尝试找到实际源节点
                                             elif source_node_id in skipped_node_ids:
+                                                # 如果源节点是 SetNode，查找 SetNode 的输入链接
+                                                if source_node_id in setnode_to_getnode_map:
+                                                    # SetNode 的输出，需要找到 SetNode 的输入源
+                                                    for setnode in workflow_data["nodes"]:
+                                                        if str(setnode["id"]) == source_node_id and "inputs" in setnode:
+                                                            for setnode_input in setnode.get("inputs", []):
+                                                                if isinstance(setnode_input, dict) and "link" in setnode_input and setnode_input["link"] is not None:
+                                                                    setnode_link_id = setnode_input["link"]
+                                                                    if setnode_link_id in links_map:
+                                                                        actual_source_id, actual_source_output = links_map[setnode_link_id]
+                                                                        if actual_source_id not in skipped_node_ids:
+                                                                            converted_inputs[input_name] = [actual_source_id, actual_source_output]
+                                                                            logger.info(f"节点{node_id}.{input_name}: 通过 SetNode {source_node_id} -> 实际源节点 {actual_source_id}")
+                                                                            break
+                                                                    break
+                                                            break
+                                                    if input_name not in converted_inputs:
+                                                        logger.warning(f"节点{node_id}.{input_name}: 无法解析 SetNode {source_node_id} 的链接，跳过")
                                                 # 如果源节点是 GetNode，查找对应的 SetNode 的源
-                                                if source_node_id in getnode_to_setnode_map:
+                                                elif source_node_id in getnode_to_setnode_map:
                                                     setnode_id = getnode_to_setnode_map[source_node_id]
                                                     # 查找 SetNode 的输入链接
                                                     for setnode in workflow_data["nodes"]:
@@ -1315,23 +1352,34 @@ def handler(job):
             logger.info(f"节点87 (WanVideoContextOptions): context_frames={context_frames}, context_stride={context_stride}, context_overlap={context_overlap}")
         
         # 节点 119: WanVideoSamplerSettings (采样器设置)
+        # 注意：cfg 和 seed 是通过链接传递的（来自 PrimitiveNode 123 和 124），不应该在 widgets_values 中
+        # widgets_values 只包含有 widget 的输入，顺序为：steps, shift, force_offload, batched_cfg, scheduler, riflex_freq_index, denoise_strength, add_noise_to_samples, rope_function, start_step, end_step, ...
         if "119" in prompt:
             if "widgets_values" in prompt["119"]:
                 widgets = prompt["119"]["widgets_values"]
+                # 确保列表长度足够
+                if len(widgets) < 14:
+                    widgets.extend([None] * (14 - len(widgets)))
+                # 只更新有 widget 的输入（cfg 和 seed 通过链接传递，不在 widgets_values 中）
                 if len(widgets) >= 1:
-                    widgets[0] = steps
+                    widgets[0] = steps  # steps (widget)
                 if len(widgets) >= 2:
-                    widgets[1] = cfg
-                if len(widgets) >= 3:
-                    widgets[2] = shift
-                if len(widgets) >= 4:
-                    widgets[3] = seed
+                    widgets[1] = shift  # shift (widget)，不是 cfg
+                # widgets[2] = force_offload (保持原值或使用默认值)
+                # widgets[3] = batched_cfg (保持原值或使用默认值)
+                if len(widgets) >= 5:
+                    # scheduler 通过链接传递，但如果有 widget 也更新
+                    pass
+                # 其他 widgets 保持原值
             if "inputs" not in prompt["119"]:
                 prompt["119"]["inputs"] = {}
             prompt["119"]["inputs"]["steps"] = steps
-            prompt["119"]["inputs"]["cfg"] = cfg
+            prompt["119"]["inputs"]["cfg"] = cfg  # 通过链接传递
             prompt["119"]["inputs"]["shift"] = shift
-            prompt["119"]["inputs"]["seed"] = seed
+            prompt["119"]["inputs"]["seed"] = seed  # 通过链接传递
+            # 确保 rope_function 是字符串，不是布尔值
+            if "rope_function" not in prompt["119"]["inputs"]:
+                prompt["119"]["inputs"]["rope_function"] = "comfy"  # 默认值
             logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}")
         
         # 节点 122: WanVideoScheduler (调度器)
