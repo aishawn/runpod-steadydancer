@@ -814,9 +814,15 @@ def handler(job):
                                                 converted_inputs[input_name] = logic_node_values[source_node_id]
                                                 logger.info(f"节点{node_id}.{input_name}: 内联 logic 节点{source_node_id}的值 = {logic_node_values[source_node_id]}")
                                             else:
-                                                converted_inputs[input_name] = [source_node_id, source_output_index]
+                                                # 检查源节点是否存在（不在prompt中或已被跳过）
+                                                if source_node_id not in prompt and source_node_id not in skipped_node_ids:
+                                                    logger.warning(f"节点{node_id}.{input_name}: 源节点 {source_node_id} 不存在，跳过此输入")
+                                                    # 不设置此输入，让ComfyUI使用默认值或报错
+                                                else:
+                                                    converted_inputs[input_name] = [source_node_id, source_output_index]
                                         else:
                                             # 如果找不到 link，保持原值或设为 None
+                                            logger.warning(f"节点{node_id}.{input_name}: 链接 {link_id} 在 links_map 中不存在")
                                             converted_inputs[input_name] = None
                                         # 如果有 widget，需要跳过 widgets_values 中的对应值（仅当是列表时）
                                         if not widgets_values_is_dict and has_widget and widget_index < len(widgets_values):
@@ -1298,8 +1304,42 @@ def handler(job):
         
         # 节点 129: OnnxDetectionModelLoader (姿态检测模型)
         if "129" in prompt:
-            vitpose_model = "onnx/vitpose_h_wholebody_model.onnx"
-            yolo_model = "onnx/yolov10m.onnx"
+            # 尝试不同的路径格式
+            vitpose_candidates = [
+                "vitpose_h_wholebody_model.onnx",  # 直接文件名
+                "onnx/vitpose_h_wholebody_model.onnx",  # 子目录格式
+            ]
+            yolo_candidates = [
+                "yolov10m.onnx",  # 直接文件名
+                "onnx/yolov10m.onnx",  # 子目录格式
+            ]
+            
+            # 检查模型文件是否存在
+            vitpose_model = None
+            yolo_model = None
+            
+            for candidate in vitpose_candidates:
+                full_path = f"/ComfyUI/models/onnx/{candidate.replace('onnx/', '')}"
+                if os.path.exists(full_path):
+                    vitpose_model = candidate
+                    logger.info(f"找到 ViTPose 模型: {full_path}")
+                    break
+            
+            for candidate in yolo_candidates:
+                full_path = f"/ComfyUI/models/onnx/{candidate.replace('onnx/', '')}"
+                if os.path.exists(full_path):
+                    yolo_model = candidate
+                    logger.info(f"找到 YOLO 模型: {full_path}")
+                    break
+            
+            # 如果找不到，使用默认路径（让ComfyUI尝试）
+            if not vitpose_model:
+                vitpose_model = "vitpose_h_wholebody_model.onnx"
+                logger.warning(f"ViTPose 模型文件不存在，使用默认路径: {vitpose_model}")
+            if not yolo_model:
+                yolo_model = "yolov10m.onnx"
+                logger.warning(f"YOLO 模型文件不存在，使用默认路径: {yolo_model}")
+            
             if "widgets_values" in prompt["129"]:
                 widgets = prompt["129"]["widgets_values"]
                 if len(widgets) >= 1:
@@ -1330,6 +1370,20 @@ def handler(job):
             prompt["63"]["inputs"]["height"] = adjusted_height
             prompt["63"]["inputs"]["num_frames"] = length
             logger.info(f"节点63 (WanVideoImageToVideoEncode): width={adjusted_width}, height={adjusted_height}, num_frames={length}")
+        
+        # 节点 68: ImageResizeKJv2 (图像尺寸调整)
+        if "68" in prompt:
+            if "widgets_values" in prompt["68"]:
+                widgets = prompt["68"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = adjusted_width  # width
+                if len(widgets) >= 2:
+                    widgets[1] = adjusted_height  # height
+            if "inputs" not in prompt["68"]:
+                prompt["68"]["inputs"] = {}
+            prompt["68"]["inputs"]["width"] = adjusted_width
+            prompt["68"]["inputs"]["height"] = adjusted_height
+            logger.info(f"节点68 (ImageResizeKJv2): width={adjusted_width}, height={adjusted_height}")
         
         # 节点 87: WanVideoContextOptions (上下文选项)
         if "87" in prompt:
@@ -1370,7 +1424,24 @@ def handler(job):
                 if len(widgets) >= 5:
                     # scheduler 通过链接传递，但如果有 widget 也更新
                     pass
-                # 其他 widgets 保持原值
+                # 确保 rope_function 是字符串，不是布尔值或错误的值
+                if len(widgets) >= 9:
+                    if widgets[8] is None or widgets[8] == False or widgets[8] == "False":
+                        widgets[8] = "comfy"  # rope_function 默认值
+                # 确保 start_step 是整数
+                if len(widgets) >= 10:
+                    if widgets[9] is None or not isinstance(widgets[9], int):
+                        try:
+                            widgets[9] = int(widgets[9]) if widgets[9] is not None else 0
+                        except (ValueError, TypeError):
+                            widgets[9] = 0  # start_step 默认值
+                # 确保 riflex_freq_index 是整数
+                if len(widgets) >= 6:
+                    if widgets[5] is None or not isinstance(widgets[5], int):
+                        try:
+                            widgets[5] = int(widgets[5]) if widgets[5] is not None else 0
+                        except (ValueError, TypeError):
+                            widgets[5] = 0  # riflex_freq_index 默认值
             if "inputs" not in prompt["119"]:
                 prompt["119"]["inputs"] = {}
             prompt["119"]["inputs"]["steps"] = steps
@@ -1378,9 +1449,21 @@ def handler(job):
             prompt["119"]["inputs"]["shift"] = shift
             prompt["119"]["inputs"]["seed"] = seed  # 通过链接传递
             # 确保 rope_function 是字符串，不是布尔值
-            if "rope_function" not in prompt["119"]["inputs"]:
+            if "rope_function" not in prompt["119"]["inputs"] or prompt["119"]["inputs"]["rope_function"] == False or prompt["119"]["inputs"]["rope_function"] == "False":
                 prompt["119"]["inputs"]["rope_function"] = "comfy"  # 默认值
-            logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}")
+            # 确保 start_step 是整数
+            if "start_step" in prompt["119"]["inputs"]:
+                try:
+                    prompt["119"]["inputs"]["start_step"] = int(prompt["119"]["inputs"]["start_step"])
+                except (ValueError, TypeError):
+                    prompt["119"]["inputs"]["start_step"] = 0
+            # 确保 riflex_freq_index 是整数
+            if "riflex_freq_index" in prompt["119"]["inputs"]:
+                try:
+                    prompt["119"]["inputs"]["riflex_freq_index"] = int(prompt["119"]["inputs"]["riflex_freq_index"])
+                except (ValueError, TypeError):
+                    prompt["119"]["inputs"]["riflex_freq_index"] = 0
+            logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}, rope_function={prompt['119']['inputs'].get('rope_function', 'comfy')}")
         
         # 节点 122: WanVideoScheduler (调度器)
         if "122" in prompt:
@@ -1588,6 +1671,13 @@ def handler(job):
                 logger.info(f"✓ 节点63 (WanVideoImageToVideoEncode): width={width_63}, height={height_63}, num_frames={num_frames_63}")
             else:
                 logger.warning("✗ 节点63 缺少 inputs")
+        if "68" in prompt:
+            if "inputs" in prompt["68"]:
+                width_68 = prompt["68"]["inputs"].get("width")
+                height_68 = prompt["68"]["inputs"].get("height")
+                logger.info(f"✓ 节点68 (ImageResizeKJv2): width={width_68}, height={height_68}")
+            else:
+                logger.warning("✗ 节点68 缺少 inputs")
         if "83" in prompt:
             if "inputs" in prompt["83"]:
                 frame_rate_83 = prompt["83"]["inputs"].get("frame_rate")
