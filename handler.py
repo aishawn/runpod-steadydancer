@@ -583,10 +583,11 @@ def handler(job):
             logger.info(f"预计算 logic 节点值: 592={logic_node_values['592']}, 593={logic_node_values['593']}, 585={logic_node_values['585']}")
         
         # 首先建立 link_id 到 [node_id, output_index] 的映射
-        # 同时建立 GetNode/SetNode 的映射关系
+        # 同时建立 GetNode/SetNode 和 PrimitiveNode 的映射关系
         links_map = {}
         setnode_to_getnode_map = {}  # SetNode ID -> {name: value, ...}
         getnode_to_setnode_map = {}  # GetNode ID -> SetNode ID
+        primitivenode_values = {}  # PrimitiveNode ID -> value (从 widgets_values 获取)
         skipped_node_ids = set()  # 记录被跳过的节点 ID
         
         # 第一遍：收集 SetNode 的值和 GetNode 的映射关系
@@ -628,6 +629,12 @@ def handler(job):
                             getnode_to_setnode_map[node_id] = setnode_id
                             logger.info(f"GetNode {node_id} ({getnode_name}) 映射到 SetNode {setnode_id}")
                             break
+            
+            elif node_type == "PrimitiveNode":
+                # PrimitiveNode 存储原始值：从 widgets_values 获取值
+                if node.get("widgets_values") and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                    primitivenode_values[node_id] = node["widgets_values"][0]
+                    logger.info(f"记录 PrimitiveNode {node_id} 的值: {node['widgets_values'][0]}")
         
         # 建立 links_map，处理 GetNode/SetNode 的链接
         if "links" in workflow_data:
@@ -640,8 +647,13 @@ def handler(job):
                     target_node_id = str(link[3])
                     target_input_index = link[4]
                     
+                    # 如果源节点是 PrimitiveNode，值会直接传递，不需要链接
+                    if source_node_id in primitivenode_values:
+                        # PrimitiveNode 的值会在处理节点输入时直接使用，这里标记为特殊值
+                        links_map[link_id] = ["__PRIMITIVE__", primitivenode_values[source_node_id]]
+                        logger.info(f"链接 {link_id}: PrimitiveNode {source_node_id} 的值 = {primitivenode_values[source_node_id]}")
                     # 如果源节点是 GetNode，找到对应的 SetNode 的源
-                    if source_node_id in getnode_to_setnode_map:
+                    elif source_node_id in getnode_to_setnode_map:
                         setnode_id = getnode_to_setnode_map[source_node_id]
                         # 查找 SetNode 的输入链接
                         for setnode in workflow_data["nodes"]:
@@ -688,6 +700,15 @@ def handler(job):
                 skipped_node_ids.add(node_id)
                 continue
             
+            # 跳过 PrimitiveNode 节点（comfyui-logic 插件节点，可能未安装）
+            # PrimitiveNode 用于定义原始值（数字、字符串等），值会通过链接传递到目标节点
+            # 在 SteadyDancer workflow 中，节点 123 (cfg) 和 124 (seed) 是 PrimitiveNode
+            # 它们的值已经在节点配置时直接设置到目标节点的 inputs 中，所以可以安全跳过
+            if node_type == "PrimitiveNode":
+                logger.info(f"跳过 {node_type} 节点 {node_id}（原始值节点，值已通过链接传递）")
+                skipped_node_ids.add(node_id)
+                continue
+            
             # 创建符合 ComfyUI API 格式的节点对象
             converted_node = {}
             # 复制所有字段
@@ -724,8 +745,12 @@ def handler(job):
                                         link_id = input_item["link"]
                                         if link_id in links_map:
                                             source_node_id, source_output_index = links_map[link_id]
+                                            # 如果源节点是 PrimitiveNode，直接使用值
+                                            if source_node_id == "__PRIMITIVE__":
+                                                converted_inputs[input_name] = source_output_index  # source_output_index 存储的是实际值
+                                                logger.info(f"节点{node_id}.{input_name}: 使用 PrimitiveNode 的值 = {source_output_index}")
                                             # 如果源节点被跳过（GetNode/SetNode/Note等），尝试找到实际源节点
-                                            if source_node_id in skipped_node_ids:
+                                            elif source_node_id in skipped_node_ids:
                                                 # 如果源节点是 GetNode，查找对应的 SetNode 的源
                                                 if source_node_id in getnode_to_setnode_map:
                                                     setnode_id = getnode_to_setnode_map[source_node_id]
@@ -1327,6 +1352,8 @@ def handler(job):
             logger.info(f"节点122 (WanVideoScheduler): scheduler={scheduler}, steps={steps}, shift={shift}")
         
         # 节点 123: PrimitiveNode (cfg)
+        # 注意：PrimitiveNode 节点会在节点转换时被跳过，但值会通过链接直接传递到目标节点
+        # 这里保留配置代码是为了确保值在转换前已设置（用于链接解析）
         if "123" in prompt:
             if "widgets_values" in prompt["123"]:
                 prompt["123"]["widgets_values"][0] = cfg
@@ -1335,6 +1362,8 @@ def handler(job):
             prompt["123"]["inputs"]["cfg"] = cfg
         
         # 节点 124: PrimitiveNode (seed)
+        # 注意：PrimitiveNode 节点会在节点转换时被跳过，但值会通过链接直接传递到目标节点
+        # 这里保留配置代码是为了确保值在转换前已设置（用于链接解析）
         if "124" in prompt:
             if "widgets_values" in prompt["124"]:
                 prompt["124"]["widgets_values"][0] = seed
