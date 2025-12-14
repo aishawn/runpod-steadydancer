@@ -140,7 +140,10 @@ RUN mkdir -p /workflows && \
     echo "Verifying key files..." && \
     ls -la /entrypoint.sh && \
     ls -la handler.py && \
-    ls -la /workflows/wanvideo_SteadyDancer_example_03.json 2>/dev/null || echo "WARNING: SteadyDancer workflow not found"
+    ls -la /workflows/wanvideo_SteadyDancer_example_03.json 2>/dev/null || echo "WARNING: SteadyDancer workflow not found" && \
+    # 验证 extra_model_paths.yaml 文件格式
+    echo "Verifying extra_model_paths.yaml..." && \
+    python -c "import yaml; f=open('/ComfyUI/extra_model_paths.yaml'); data=yaml.safe_load(f); f.close(); assert isinstance(data, dict), f'YAML must be a dict, got {type(data)}'; assert 'comfyui' in data, 'YAML must contain comfyui key'; print('✓ extra_model_paths.yaml format is valid')" || (echo "ERROR: extra_model_paths.yaml format is invalid" && cat /ComfyUI/extra_model_paths.yaml && exit 1)
 
 RUN chmod +x /entrypoint.sh
 

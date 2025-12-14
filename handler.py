@@ -929,13 +929,16 @@ def handler(job):
             batch_size = 1  # 默认值
             if "widgets_values" in prompt["572"]:
                 widgets = prompt["572"]["widgets_values"]
+                # 先确保列表长度足够（至少5个元素），再访问索引
+                if len(widgets) < 5:
+                    widgets.extend([None] * (5 - len(widgets)))
                 widgets[0] = adjusted_width
                 widgets[1] = adjusted_height
                 widgets[2] = length
                 widgets[3] = 1  # strength = 1 for I2V
-                if len(widgets) < 5:
-                    widgets.append(1)  # batch_size
-                batch_size = widgets[4] if len(widgets) > 4 else 1
+                if widgets[4] is None:
+                    widgets[4] = 1  # batch_size
+                batch_size = widgets[4]
             if "inputs" not in prompt["572"]:
                 prompt["572"]["inputs"] = {}
             prompt["572"]["inputs"]["width"] = adjusted_width
@@ -959,14 +962,13 @@ def handler(job):
         if "563" in prompt:
             if "widgets_values" in prompt["563"]:
                 widgets = prompt["563"]["widgets_values"]
+                # 先确保列表长度足够（至少6个元素），再访问索引
+                if len(widgets) < 6:
+                    widgets.extend([None] * (6 - len(widgets)))
                 widgets[0] = seed
                 widgets[2] = steps
                 widgets[3] = cfg
                 # MEGA v12 推荐使用 euler_a/beta（根据 Hugging Face 文档）
-                if len(widgets) <= 4:
-                    widgets.extend([None] * (5 - len(widgets)))
-                if len(widgets) <= 5:
-                    widgets.extend([None] * (6 - len(widgets)))
                 # 如果用户没有指定或值为 "randomize"，使用推荐的默认值
                 if not widgets[4] or widgets[4] == "randomize":
                     widgets[4] = sampler_name  # 使用 job_input 中的值或默认 euler_a
@@ -1146,15 +1148,17 @@ def handler(job):
             logger.info(f"节点129 (OnnxDetectionModelLoader): vitpose={vitpose_model}, yolo={yolo_model}")
         
         # 节点 63: WanVideoImageToVideoEncode (图像编码)
+        # widgets_values 格式: [width, height, num_frames, noise_aug_strength, start_latent_strength, end_latent_strength, force_offload, fun_or_fl2v_model, tiled_vae, augment_empty_frames]
         if "63" in prompt:
             if "widgets_values" in prompt["63"]:
                 widgets = prompt["63"]["widgets_values"]
-                if len(widgets) >= 9:
-                    widgets[9] = adjusted_width  # width
-                if len(widgets) >= 10:
-                    widgets[10] = adjusted_height  # height
-                if len(widgets) >= 11:
-                    widgets[11] = length  # num_frames
+                # 确保列表长度足够，索引从0开始，所以需要 len >= index + 1
+                if len(widgets) >= 1:
+                    widgets[0] = adjusted_width  # width
+                if len(widgets) >= 2:
+                    widgets[1] = adjusted_height  # height
+                if len(widgets) >= 3:
+                    widgets[2] = length  # num_frames
             if "inputs" not in prompt["63"]:
                 prompt["63"]["inputs"] = {}
             prompt["63"]["inputs"]["width"] = adjusted_width
