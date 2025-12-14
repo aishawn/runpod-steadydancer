@@ -11,6 +11,7 @@ import urllib.parse
 import binascii # Base64 에러 처리를 위해 import
 import subprocess
 import time
+import shutil
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -440,7 +441,6 @@ def ensure_model_in_checkpoints(model_name):
             else:
                 logger.warning(f"符号链接创建后验证失败，尝试复制文件")
                 # 如果符号链接验证失败，尝试复制文件
-                import shutil
                 if os.path.exists(target_path):
                     os.remove(target_path)
                 shutil.copy2(source_path, target_path)
@@ -450,7 +450,6 @@ def ensure_model_in_checkpoints(model_name):
             logger.warning(f"创建符号链接失败: {e}，尝试复制文件")
             try:
                 # 如果符号链接失败，尝试复制文件
-                import shutil
                 if os.path.exists(target_path):
                     os.remove(target_path)
                 shutil.copy2(source_path, target_path)
