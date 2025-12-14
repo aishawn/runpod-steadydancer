@@ -1385,6 +1385,25 @@ def handler(job):
             prompt["68"]["inputs"]["height"] = adjusted_height
             logger.info(f"节点68 (ImageResizeKJv2): width={adjusted_width}, height={adjusted_height}")
         
+        # 节点 77: ImageResizeKJv2 (姿态图像尺寸调整)
+        # 注意：节点77的image输入来自节点130的输出，width和height来自GetNode
+        # 如果链接解析失败，这里设置默认值作为后备
+        if "77" in prompt:
+            if "widgets_values" in prompt["77"]:
+                widgets = prompt["77"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = adjusted_width  # width
+                if len(widgets) >= 2:
+                    widgets[1] = adjusted_height  # height
+            if "inputs" not in prompt["77"]:
+                prompt["77"]["inputs"] = {}
+            # 如果width和height没有通过链接设置，使用调整后的值
+            if "width" not in prompt["77"]["inputs"] or prompt["77"]["inputs"]["width"] is None:
+                prompt["77"]["inputs"]["width"] = adjusted_width
+            if "height" not in prompt["77"]["inputs"] or prompt["77"]["inputs"]["height"] is None:
+                prompt["77"]["inputs"]["height"] = adjusted_height
+            logger.info(f"节点77 (ImageResizeKJv2): width={prompt['77']['inputs'].get('width')}, height={prompt['77']['inputs'].get('height')}")
+        
         # 节点 87: WanVideoContextOptions (上下文选项)
         if "87" in prompt:
             context_frames = job_input.get("context_frames", 81)
@@ -1678,6 +1697,34 @@ def handler(job):
                 logger.info(f"✓ 节点68 (ImageResizeKJv2): width={width_68}, height={height_68}")
             else:
                 logger.warning("✗ 节点68 缺少 inputs")
+        if "77" in prompt:
+            if "inputs" in prompt["77"]:
+                width_77 = prompt["77"]["inputs"].get("width")
+                height_77 = prompt["77"]["inputs"].get("height")
+                image_77 = prompt["77"]["inputs"].get("image")
+                logger.info(f"✓ 节点77 (ImageResizeKJv2): width={width_77}, height={height_77}, image={'已设置' if image_77 else '未设置'}")
+            else:
+                logger.warning("✗ 节点77 缺少 inputs")
+        if "28" in prompt:
+            if "inputs" in prompt["28"]:
+                vae_28 = prompt["28"]["inputs"].get("vae")
+                samples_28 = prompt["28"]["inputs"].get("samples")
+                logger.info(f"✓ 节点28 (WanVideoDecode): vae={'已设置' if vae_28 else '未设置'}, samples={'已设置' if samples_28 else '未设置'}")
+            else:
+                logger.warning("✗ 节点28 缺少 inputs")
+        if "79" in prompt:
+            if "inputs" in prompt["79"]:
+                image_1_79 = prompt["79"]["inputs"].get("image_1")
+                image_2_79 = prompt["79"]["inputs"].get("image_2")
+                logger.info(f"✓ 节点79 (ImageConcatMulti): image_1={'已设置' if image_1_79 else '未设置'}, image_2={'已设置' if image_2_79 else '未设置'}")
+            else:
+                logger.warning("✗ 节点79 缺少 inputs")
+        if "131" in prompt:
+            if "inputs" in prompt["131"]:
+                images_131 = prompt["131"]["inputs"].get("images")
+                logger.info(f"✓ 节点131 (PreviewImage): images={'已设置' if images_131 else '未设置'}")
+            else:
+                logger.warning("✗ 节点131 缺少 inputs")
         if "83" in prompt:
             if "inputs" in prompt["83"]:
                 frame_rate_83 = prompt["83"]["inputs"].get("frame_rate")
