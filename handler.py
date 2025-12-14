@@ -846,7 +846,6 @@ def handler(job):
             checkpoint_models = []
             try:
                 url = f"http://{server_address}:8188/object_info"
-                import urllib.request
                 with urllib.request.urlopen(url, timeout=5) as response:
                     object_info = json.loads(response.read())
                     if "CheckpointLoaderSimple" in object_info:
@@ -1261,8 +1260,9 @@ def handler(job):
         
         # 节点 130: PoseDetectionOneToAllAnimation (姿态检测)
         if "130" in prompt:
-            pose_width = job_input.get("width", 832)
-            pose_height = job_input.get("height", 480)
+            # 使用调整后的尺寸，确保与视频生成尺寸一致
+            pose_width = adjusted_width
+            pose_height = adjusted_height
             align_to = job_input.get("align_to", "ref")
             draw_face_points = job_input.get("draw_face_points", "weak")
             draw_head = job_input.get("draw_head", "full")
