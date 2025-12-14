@@ -6,8 +6,9 @@ import base64
 import json
 import uuid
 import logging
-import urllib.request
-import urllib.parse
+import urllib.request as urllib_request
+import urllib.parse as urllib_parse
+import urllib.error as urllib_error
 import binascii # Base64 에러 처리를 위해 import
 import subprocess
 import time
@@ -116,12 +117,12 @@ def queue_prompt(prompt, is_mega_model=False):
     
     p = {"prompt": prompt, "client_id": client_id}
     data = json.dumps(p).encode('utf-8')
-    req = urllib.request.Request(url, data=data)
+    req = urllib_request.Request(url, data=data)
     req.add_header('Content-Type', 'application/json')
     try:
-        response = urllib.request.urlopen(req)
+        response = urllib_request.urlopen(req)
         return json.loads(response.read())
-    except urllib.error.HTTPError as e:
+    except urllib_error.HTTPError as e:
         error_body = e.read().decode('utf-8')
         logger.error(f"HTTP Error {e.code}: {e.reason}")
         logger.error(f"Error response: {error_body}")
@@ -136,14 +137,14 @@ def get_image(filename, subfolder, folder_type):
     url = f"http://{server_address}:8188/view"
     logger.info(f"Getting image from: {url}")
     data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
-    url_values = urllib.parse.urlencode(data)
-    with urllib.request.urlopen(f"{url}?{url_values}") as response:
+    url_values = urllib_parse.urlencode(data)
+    with urllib_request.urlopen(f"{url}?{url_values}") as response:
         return response.read()
 
 def get_history(prompt_id):
     url = f"http://{server_address}:8188/history/{prompt_id}"
     logger.info(f"Getting history from: {url}")
-    with urllib.request.urlopen(url) as response:
+    with urllib_request.urlopen(url) as response:
         return json.loads(response.read())
 
 def get_videos(ws, prompt, is_mega_model=False):
@@ -241,7 +242,7 @@ def get_available_models():
     """获取 ComfyUI 中可用的模型列表"""
     try:
         url = f"http://{server_address}:8188/object_info"
-        with urllib.request.urlopen(url, timeout=5) as response:
+        with urllib_request.urlopen(url, timeout=5) as response:
             object_info = json.loads(response.read())
             models = []
             
@@ -609,6 +610,12 @@ def handler(job):
                 logger.info(f"跳过 {node_type} 节点 {node_id}（注释节点，不参与执行）")
                 continue
             
+            # 跳过 GetNode 和 SetNode 节点（comfyui-logic 插件节点，可能未安装）
+            # 这些节点仅用于 workflow 内部值传递，实际执行时会通过链接直接传递值
+            if node_type == "GetNode" or node_type == "SetNode":
+                logger.info(f"跳过 {node_type} 节点 {node_id}（逻辑节点，不参与执行）")
+                continue
+            
             # 创建符合 ComfyUI API 格式的节点对象
             converted_node = {}
             # 复制所有字段
@@ -845,7 +852,7 @@ def handler(job):
             checkpoint_models = []
             try:
                 url = f"http://{server_address}:8188/object_info"
-                with urllib.request.urlopen(url, timeout=5) as response:
+                with urllib_request.urlopen(url, timeout=5) as response:
                     object_info = json.loads(response.read())
                     if "CheckpointLoaderSimple" in object_info:
                         loader_info = object_info["CheckpointLoaderSimple"]
@@ -1507,7 +1514,7 @@ def handler(job):
     max_http_attempts = 180
     for http_attempt in range(max_http_attempts):
         try:
-            response = urllib.request.urlopen(http_url, timeout=5)
+            response = urllib_request.urlopen(http_url, timeout=5)
             logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
             break
         except Exception as e:
