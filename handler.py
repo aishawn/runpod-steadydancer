@@ -914,7 +914,7 @@ def handler(job):
             prompt[node_id] = converted_node
         logger.info("已转换 nodes 数组格式为节点 ID key 格式")
         
-        # 后处理：验证关键节点的必需输入是否已设置
+        # 后处理：验证关键节点的必需输入是否已设置，并尝试修复
         # 这有助于早期发现链接解析问题
         critical_nodes = {
             "28": {"vae": "WANVAE", "samples": "LATENT"},  # WanVideoDecode
@@ -923,6 +923,7 @@ def handler(job):
             "131": {"images": "IMAGE"},  # PreviewImage
         }
         
+        # 尝试修复缺失的链接
         for node_id, required_inputs in critical_nodes.items():
             if node_id in prompt:
                 if "inputs" not in prompt[node_id]:
@@ -931,9 +932,86 @@ def handler(job):
                 
                 for input_name, input_type in required_inputs.items():
                     if input_name not in prompt[node_id]["inputs"] or prompt[node_id]["inputs"][input_name] is None:
-                        logger.warning(f"⚠️ 关键节点 {node_id} 缺少必需输入 {input_name} ({input_type})")
-                        # 尝试从links查找是否有应该设置但未设置的链接
-                        # 这是最后的补救措施
+                        logger.warning(f"⚠️ 关键节点 {node_id} 缺少必需输入 {input_name} ({input_type})，尝试修复")
+                        
+                        # 从原始workflow中查找此节点的输入链接
+                        for orig_node in workflow_data["nodes"]:
+                            if str(orig_node["id"]) == node_id:
+                                if "inputs" in orig_node and isinstance(orig_node["inputs"], list):
+                                    for input_item in orig_node["inputs"]:
+                                        if isinstance(input_item, dict) and input_item.get("name") == input_name:
+                                            if "link" in input_item and input_item["link"] is not None:
+                                                link_id = input_item["link"]
+                                                logger.info(f"  节点{node_id}.{input_name} 的链接ID: {link_id}")
+                                                
+                                                # 查找这个链接的源节点
+                                                if "links" in workflow_data:
+                                                    for link in workflow_data["links"]:
+                                                        if len(link) >= 6 and link[0] == link_id:
+                                                            source_node_id = str(link[1])
+                                                            source_output_index = link[2]
+                                                            logger.info(f"  链接{link_id}: 源节点 {source_node_id}, 输出索引 {source_output_index}")
+                                                            
+                                                            # 检查源节点类型
+                                                            source_node_type = None
+                                                            source_node_name = None
+                                                            for src_node in workflow_data["nodes"]:
+                                                                if str(src_node["id"]) == source_node_id:
+                                                                    source_node_type = src_node.get("type")
+                                                                    source_node_name = src_node.get("title", "")
+                                                                    break
+                                                            
+                                                            logger.info(f"  源节点类型: {source_node_type}, 名称: {source_node_name}")
+                                                            
+                                                            # 如果源节点是GetNode，查找对应的SetNode
+                                                            if source_node_type == "GetNode":
+                                                                getnode_name = source_node_name.replace("Get_", "")
+                                                                if not getnode_name:
+                                                                    for src_node in workflow_data["nodes"]:
+                                                                        if str(src_node["id"]) == source_node_id:
+                                                                            if src_node.get("widgets_values"):
+                                                                                getnode_name = src_node["widgets_values"][0] if isinstance(src_node["widgets_values"], list) else ""
+                                                                            break
+                                                                
+                                                                logger.info(f"  GetNode名称: {getnode_name}")
+                                                                
+                                                                # 查找对应的SetNode
+                                                                for setnode in workflow_data["nodes"]:
+                                                                    if setnode.get("type") == "SetNode":
+                                                                        setnode_name = setnode.get("title", "").replace("Set_", "")
+                                                                        if not setnode_name and setnode.get("widgets_values"):
+                                                                            setnode_name = setnode["widgets_values"][0] if isinstance(setnode["widgets_values"], list) else ""
+                                                                        
+                                                                        if setnode_name == getnode_name:
+                                                                            # 找到SetNode，查找其输入链接
+                                                                            logger.info(f"  找到SetNode {setnode['id']}: {setnode_name}")
+                                                                            if "inputs" in setnode and isinstance(setnode["inputs"], list):
+                                                                                for setnode_input in setnode["inputs"]:
+                                                                                    if isinstance(setnode_input, dict) and "link" in setnode_input:
+                                                                                        setnode_link_id = setnode_input["link"]
+                                                                                        logger.info(f"  SetNode的输入链接ID: {setnode_link_id}")
+                                                                                        # 查找SetNode的源节点
+                                                                                        for link2 in workflow_data["links"]:
+                                                                                            if len(link2) >= 6 and link2[0] == setnode_link_id:
+                                                                                                actual_source_id = str(link2[1])
+                                                                                                actual_output_index = link2[2]
+                                                                                                logger.info(f"  SetNode的源节点: {actual_source_id}, 输出索引: {actual_output_index}")
+                                                                                                
+                                                                                                # 设置链接
+                                                                                                if actual_source_id not in skipped_node_ids:
+                                                                                                    prompt[node_id]["inputs"][input_name] = [actual_source_id, actual_output_index]
+                                                                                                    logger.info(f"  ✅ 修复成功: 节点{node_id}.{input_name} = [{actual_source_id}, {actual_output_index}]")
+                                                                                                break
+                                                                                        break
+                                                                            break
+                                                            else:
+                                                                # 源节点不是GetNode，直接使用
+                                                                if source_node_id not in skipped_node_ids:
+                                                                    prompt[node_id]["inputs"][input_name] = [source_node_id, source_output_index]
+                                                                    logger.info(f"  ✅ 修复成功: 节点{node_id}.{input_name} = [{source_node_id}, {source_output_index}]")
+                                                            break
+                                            break
+                                break
     else:
         # new_Wan22_api.json 使用节点 ID key 格式
         prompt = workflow_data
