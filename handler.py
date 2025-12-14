@@ -591,6 +591,8 @@ def handler(job):
         skipped_node_ids = set()  # 记录被跳过的节点 ID
         
         # 第一遍：收集 SetNode 的值和 GetNode 的映射关系
+        # 优化：分两次扫描，先扫描SetNode和PrimitiveNode，再扫描GetNode建立映射
+        # 第一次扫描：收集SetNode和PrimitiveNode
         for node in workflow_data["nodes"]:
             node_id = str(node["id"])
             node_type = node.get("type", "")
@@ -616,7 +618,18 @@ def handler(job):
                     setnode_to_getnode_map[node_id][setnode_name] = setnode_value
                     logger.info(f"记录 SetNode {node_id} 存储的值: {setnode_name}")
             
-            elif node_type == "GetNode":
+            elif node_type == "PrimitiveNode":
+                # PrimitiveNode 存储原始值：从 widgets_values 获取值
+                if node.get("widgets_values") and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                    primitivenode_values[node_id] = node["widgets_values"][0]
+                    logger.info(f"记录 PrimitiveNode {node_id} 的值: {node['widgets_values'][0]}")
+        
+        # 第二次扫描：建立GetNode到SetNode的映射
+        for node in workflow_data["nodes"]:
+            node_id = str(node["id"])
+            node_type = node.get("type", "")
+            
+            if node_type == "GetNode":
                 # GetNode 获取值：从 widgets_values 获取名称
                 getnode_name = node.get("title", "").replace("Get_", "")
                 if not getnode_name and node.get("widgets_values"):
@@ -629,12 +642,9 @@ def handler(job):
                             getnode_to_setnode_map[node_id] = setnode_id
                             logger.info(f"GetNode {node_id} ({getnode_name}) 映射到 SetNode {setnode_id}")
                             break
-            
-            elif node_type == "PrimitiveNode":
-                # PrimitiveNode 存储原始值：从 widgets_values 获取值
-                if node.get("widgets_values") and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    primitivenode_values[node_id] = node["widgets_values"][0]
-                    logger.info(f"记录 PrimitiveNode {node_id} 的值: {node['widgets_values'][0]}")
+                    # 如果未找到对应的SetNode，记录警告
+                    if node_id not in getnode_to_setnode_map:
+                        logger.warning(f"GetNode {node_id} ({getnode_name}) 未找到对应的 SetNode，可能导致链接解析失败")
         
         # 建立 links_map，处理 GetNode/SetNode 的链接
         if "links" in workflow_data:
@@ -806,7 +816,35 @@ def handler(job):
                                                                     break
                                                             break
                                                     if input_name not in converted_inputs:
-                                                        logger.warning(f"节点{node_id}.{input_name}: 无法解析 GetNode {source_node_id} 的链接，跳过")
+                                                        logger.warning(f"节点{node_id}.{input_name}: 无法解析 GetNode {source_node_id} 的链接，尝试直接查找SetNode")
+                                                        # 如果GetNode映射失败，尝试直接查找对应的SetNode
+                                                        # 通过GetNode的widgets_values获取名称
+                                                        getnode_name = None
+                                                        for getnode in workflow_data["nodes"]:
+                                                            if str(getnode["id"]) == source_node_id:
+                                                                getnode_name = getnode.get("title", "").replace("Get_", "")
+                                                                if not getnode_name and getnode.get("widgets_values"):
+                                                                    getnode_name = getnode["widgets_values"][0] if isinstance(getnode["widgets_values"], list) else ""
+                                                                break
+                                                        # 查找对应的SetNode
+                                                        if getnode_name:
+                                                            for setnode in workflow_data["nodes"]:
+                                                                setnode_name = setnode.get("title", "").replace("Set_", "")
+                                                                if not setnode_name and setnode.get("widgets_values"):
+                                                                    setnode_name = setnode["widgets_values"][0] if isinstance(setnode["widgets_values"], list) else ""
+                                                                if setnode_name == getnode_name:
+                                                                    # 找到SetNode，查找其输入链接
+                                                                    if "inputs" in setnode and isinstance(setnode["inputs"], list):
+                                                                        for setnode_input in setnode["inputs"]:
+                                                                            if isinstance(setnode_input, dict) and "link" in setnode_input and setnode_input["link"] is not None:
+                                                                                setnode_link_id = setnode_input["link"]
+                                                                                if setnode_link_id in links_map:
+                                                                                    actual_source_id, actual_source_output = links_map[setnode_link_id]
+                                                                                    if actual_source_id not in skipped_node_ids:
+                                                                                        converted_inputs[input_name] = [actual_source_id, actual_source_output]
+                                                                                        logger.info(f"节点{node_id}.{input_name}: 通过直接查找SetNode -> 实际源节点 {actual_source_id}")
+                                                                                        break
+                                                                    break
                                                 else:
                                                     logger.warning(f"节点{node_id}.{input_name}: 源节点 {source_node_id} 被跳过且无法解析，跳过此输入")
                                             # 如果源节点是 logic 节点，直接使用计算的值
@@ -875,6 +913,27 @@ def handler(job):
                     logger.warning(f"节点 {node_id} 缺少 type 和 class_type 字段")
             prompt[node_id] = converted_node
         logger.info("已转换 nodes 数组格式为节点 ID key 格式")
+        
+        # 后处理：验证关键节点的必需输入是否已设置
+        # 这有助于早期发现链接解析问题
+        critical_nodes = {
+            "28": {"vae": "WANVAE", "samples": "LATENT"},  # WanVideoDecode
+            "77": {"image": "IMAGE", "width": "INT", "height": "INT"},  # ImageResizeKJv2
+            "79": {"image_1": "IMAGE"},  # ImageConcatMulti
+            "131": {"images": "IMAGE"},  # PreviewImage
+        }
+        
+        for node_id, required_inputs in critical_nodes.items():
+            if node_id in prompt:
+                if "inputs" not in prompt[node_id]:
+                    logger.warning(f"⚠️ 关键节点 {node_id} 缺少 inputs 对象")
+                    prompt[node_id]["inputs"] = {}
+                
+                for input_name, input_type in required_inputs.items():
+                    if input_name not in prompt[node_id]["inputs"] or prompt[node_id]["inputs"][input_name] is None:
+                        logger.warning(f"⚠️ 关键节点 {node_id} 缺少必需输入 {input_name} ({input_type})")
+                        # 尝试从links查找是否有应该设置但未设置的链接
+                        # 这是最后的补救措施
     else:
         # new_Wan22_api.json 使用节点 ID key 格式
         prompt = workflow_data
