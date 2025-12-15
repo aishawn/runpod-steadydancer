@@ -151,6 +151,7 @@ def get_videos(ws, prompt, is_mega_model=False):
     prompt_id = queue_prompt(prompt, is_mega_model)['prompt_id']
     output_videos = {}
     error_info = None
+    execution_history = None  # 保存执行历史用于调试
     
     while True:
         out = ws.recv()
@@ -178,6 +179,7 @@ def get_videos(ws, prompt, is_mega_model=False):
             continue
 
     history = get_history(prompt_id)[prompt_id]
+    execution_history = history  # 保存用于调试
     
     # 检查是否有错误信息
     if 'error' in history:
@@ -209,6 +211,13 @@ def get_videos(ws, prompt, is_mega_model=False):
     for node_id in history['outputs']:
         node_output = history['outputs'][node_id]
         videos_output = []
+        
+        # SteadyDancer workflow: 完全跳过节点 117 的输出（即使它生成了文件）
+        if node_id == "117":
+            logger.info(f"🚫 跳过节点 117 的输出（姿态视频，不应返回）")
+            output_videos[node_id] = []
+            continue
+        
         # 支持多种视频输出格式：gifs (标准 workflow) 和 videos (VHS_VideoCombine)
         video_list = None
         if 'gifs' in node_output:
@@ -223,6 +232,11 @@ def get_videos(ws, prompt, is_mega_model=False):
                     video_path = video['fullpath']
                     # 检查文件是否存在（save_output=False 的节点不会保存文件）
                     if os.path.exists(video_path):
+                        # 检查文件类型：节点 117 可能生成 GIF（temp 目录），应该跳过
+                        if node_id == "117" or ("temp" in video_path and "vitpose" in video_path):
+                            logger.info(f"🚫 跳过节点 {node_id} 的临时文件: {video_path}")
+                            continue
+                        
                         with open(video_path, 'rb') as f:
                             video_data = base64.b64encode(f.read()).decode('utf-8')
                         videos_output.append(video_data)
@@ -234,6 +248,12 @@ def get_videos(ws, prompt, is_mega_model=False):
                     subfolder = video.get('subfolder', '')
                     folder_type = video.get('type', 'output')
                     filename = video['filename']
+                    
+                    # 检查是否是节点 117 的临时文件
+                    if node_id == "117" or (folder_type == "temp" and "vitpose" in filename):
+                        logger.info(f"🚫 跳过节点 {node_id} 的临时文件: {filename}")
+                        continue
+                    
                     try:
                         video_bytes = get_image(filename, subfolder, folder_type)
                         video_data = base64.b64encode(video_bytes).decode('utf-8')
@@ -241,9 +261,13 @@ def get_videos(ws, prompt, is_mega_model=False):
                         logger.info(f"✅ 节点 {node_id} 生成视频: {filename}")
                     except Exception as e:
                         logger.warning(f"⚠️ 无法读取节点 {node_id} 的视频文件 {filename}: {e}")
+        else:
+            logger.info(f"📭 节点 {node_id} 没有视频输出（video_list 为空）")
+        
         output_videos[node_id] = videos_output
-
-    return output_videos
+    
+    # 返回执行历史信息用于调试
+    return output_videos, execution_history
 
 def get_available_models():
     """获取 ComfyUI 中可用的模型列表"""
@@ -2148,10 +2172,18 @@ def handler(job):
             prompt["83"]["inputs"]["format"] = video_format
             prompt["83"]["inputs"]["save_output"] = True
             
-            # 检查输入连接是否正确
+            # 检查并修复 images 输入连接（来自节点 115）
             images_input = prompt["83"]["inputs"].get("images")
+            if not images_input or images_input is None:
+                # 尝试修复：节点 115 的输出应该连接到节点 83
+                if "115" in prompt:
+                    prompt["83"]["inputs"]["images"] = ["115", 0]
+                    logger.info(f"🔧 节点83: 修复 images 输入 = ['115', 0]")
+                else:
+                    logger.error(f"❌ 节点83: 缺少 images 输入，且节点 115 不存在")
+            
             logger.info(f"✅ 节点83 (VHS_VideoCombine - 最终视频): frame_rate={frame_rate}, filename_prefix={filename_prefix}, format={video_format}, save_output=True")
-            logger.info(f"   images 输入: {images_input}")
+            logger.info(f"   images 输入: {prompt['83']['inputs'].get('images')}")
         
         # 节点 117: VHS_VideoCombine (姿态检测视频 - 完全禁用输出)
         # 确保节点 117 不输出视频文件，只使用节点 83 的输出
@@ -2170,6 +2202,8 @@ def handler(job):
             prompt["117"]["inputs"]["save_output"] = False
             prompt["117"]["inputs"]["format"] = "image/gif"  # 减少内存占用
             
+            # 注意：即使 save_output=False，VHS_VideoCombine 仍可能在 temp 目录生成临时文件
+            # 但我们在 get_videos 中会过滤掉节点 117 的输出
             logger.info(f"🚫 节点117 (VHS_VideoCombine - 姿态视频): save_output=False, format=image/gif (完全禁用视频输出)")
         
         # 节点 130: PoseDetectionOneToAllAnimation (姿态检测)
@@ -2512,7 +2546,7 @@ def handler(job):
                 raise Exception("웹소켓 연결 시간 초과 (3분)")
             time.sleep(5)
     try:
-        videos = get_videos(ws, prompt, is_mega_model or use_steadydancer)
+        videos, execution_history = get_videos(ws, prompt, is_mega_model or use_steadydancer)
         ws.close()
 
         # 调试：打印所有返回的视频节点
@@ -2520,6 +2554,27 @@ def handler(job):
         for node_id in videos:
             video_count = len(videos[node_id]) if videos[node_id] else 0
             logger.info(f"  节点 {node_id}: {video_count} 个视频")
+        
+        # 检查执行历史中节点 83 的详细信息
+        if execution_history and 'outputs' in execution_history:
+            logger.info(f"📋 执行历史中的输出节点: {list(execution_history['outputs'].keys())}")
+            if "83" in execution_history['outputs']:
+                node83_output = execution_history['outputs']["83"]
+                logger.info(f"📊 节点 83 的输出信息: {list(node83_output.keys())}")
+                if 'videos' in node83_output:
+                    logger.info(f"📹 节点 83 的 videos 列表长度: {len(node83_output['videos'])}")
+                    for i, video in enumerate(node83_output['videos']):
+                        video_path = video.get('fullpath', video.get('filename', 'N/A'))
+                        video_type = video.get('type', 'unknown')
+                        logger.info(f"   视频 {i}: {video_path} (type: {video_type})")
+                        if video_path and os.path.exists(video_path):
+                            logger.info(f"     ✅ 文件存在")
+                        else:
+                            logger.warning(f"     ❌ 文件不存在")
+                else:
+                    logger.error("❌ 节点 83 的输出中没有 'videos' 字段")
+            else:
+                logger.error("❌ 节点 83 不在执行历史的输出中！可能工作流执行失败或节点 83 未执行")
 
         # SteadyDancer workflow: 只返回节点 83 的最终视频，如果没有则报错，绝不返回节点 117
         if use_steadydancer:
@@ -2535,10 +2590,10 @@ def handler(job):
             # 检查是否有节点 117 的视频（用于错误提示）
             if "117" in videos and videos["117"]:
                 logger.error("❌ 检测到节点 117（姿态视频），但节点 83（最终视频）未生成")
-                return {"error": "视频生成失败：只生成了姿态检测视频（节点 117），没有生成最终的跳舞视频（节点 83）。请检查工作流配置，确保节点 83 的 save_output=True 且输入连接正确。"}
+                return {"error": "视频生成失败：只生成了姿态检测视频（节点 117），没有生成最终的跳舞视频（节点 83）。可能原因：1) 节点 83 的 images 输入连接错误 2) 节点 83 的 save_output 未正确设置 3) 工作流执行过程中节点 83 未执行。请检查工作流配置和执行日志。"}
             else:
                 logger.error("❌ 节点 83 和节点 117 都没有视频输出")
-                return {"error": "视频生成失败：节点 83（最终视频）没有生成视频。请检查工作流执行日志。"}
+                return {"error": "视频生成失败：节点 83（最终视频）没有生成视频。可能原因：1) 工作流执行失败 2) 节点 83 的输入连接错误 3) 节点 83 未执行。请检查工作流执行日志。"}
         
         # 对于其他 workflow，返回第一个找到的视频
         for node_id in videos:
