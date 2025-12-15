@@ -63,6 +63,7 @@ RUN mkdir -p /ComfyUI/models/diffusion_models \
              /ComfyUI/models/text_encoders \
              /ComfyUI/models/vae \
              /ComfyUI/models/onnx \
+             /ComfyUI/models/loras \
              /ComfyUI/input \
              /ComfyUI/output \
              /ComfyUI/temp
@@ -121,6 +122,21 @@ RUN hfd.sh Wan-AI/Wan2.2-Animate-14B \
     mv /tmp/hfd_yolo/process_checkpoint/det/yolov10m.onnx /ComfyUI/models/onnx/ && \
     rm -rf /tmp/hfd_yolo
 
+# Download LoRA model for SteadyDancer workflow
+# LoRA model: lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors
+# Note: loras directory is already created above
+RUN mkdir -p /ComfyUI/models/loras/WanVideo/Lightx2v && \
+    hfd.sh Kijai/WanVideo_comfy \
+      --include "Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors" \
+      --tool aria2c \
+      -x 8 -j 8 \
+      --local-dir /tmp/hfd_lora && \
+    mv /tmp/hfd_lora/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors /ComfyUI/models/loras/WanVideo/Lightx2v/ && \
+    rm -rf /tmp/hfd_lora && \
+    # 验证LoRA模型文件已下载
+    ls -lh /ComfyUI/models/loras/WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors && \
+    echo "✓ LoRA model downloaded successfully"
+
 # Install project requirements if exists
 # Most dependencies are already installed via custom nodes, but install any additional ones
 RUN if [ -f "requirements.txt" ]; then \
@@ -143,7 +159,17 @@ RUN mkdir -p /workflows && \
     ls -la /workflows/wanvideo_SteadyDancer_example_03.json 2>/dev/null || echo "WARNING: SteadyDancer workflow not found" && \
     # 验证 extra_model_paths.yaml 文件格式
     echo "Verifying extra_model_paths.yaml..." && \
-    python -c "import yaml; f=open('/ComfyUI/extra_model_paths.yaml'); data=yaml.safe_load(f); f.close(); assert isinstance(data, dict), f'YAML must be a dict, got {type(data)}'; assert 'comfyui' in data, 'YAML must contain comfyui key'; print('✓ extra_model_paths.yaml format is valid')" || (echo "ERROR: extra_model_paths.yaml format is invalid" && cat /ComfyUI/extra_model_paths.yaml && exit 1)
+    python -c "import yaml; f=open('/ComfyUI/extra_model_paths.yaml'); data=yaml.safe_load(f); f.close(); assert isinstance(data, dict), f'YAML must be a dict, got {type(data)}'; assert 'comfyui' in data, 'YAML must contain comfyui key'; print('✓ extra_model_paths.yaml format is valid')" || (echo "ERROR: extra_model_paths.yaml format is invalid" && cat /ComfyUI/extra_model_paths.yaml && exit 1) && \
+    # 验证所有必需的模型文件已下载
+    echo "Verifying model files..." && \
+    test -f /ComfyUI/models/clip_vision/clip_vision_h.safetensors && echo "✓ CLIP Vision model found" || (echo "ERROR: CLIP Vision model not found" && exit 1) && \
+    test -f /ComfyUI/models/text_encoders/umt5-xxl-enc-bf16.safetensors && echo "✓ Text encoder model found" || (echo "ERROR: Text encoder model not found" && exit 1) && \
+    test -f /ComfyUI/models/vae/Wan2_1_VAE_bf16.safetensors && echo "✓ VAE model found" || (echo "ERROR: VAE model not found" && exit 1) && \
+    test -f /ComfyUI/models/onnx/vitpose_h_wholebody_model.onnx && echo "✓ ViTPose model found" || (echo "ERROR: ViTPose model not found" && exit 1) && \
+    test -f /ComfyUI/models/onnx/vitpose_h_wholebody_data.bin && echo "✓ ViTPose data file found" || (echo "ERROR: ViTPose data file not found" && exit 1) && \
+    test -f /ComfyUI/models/onnx/yolov10m.onnx && echo "✓ YOLO model found" || (echo "ERROR: YOLO model not found" && exit 1) && \
+    test -f /ComfyUI/models/loras/WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors && echo "✓ LoRA model found" || (echo "ERROR: LoRA model not found" && exit 1) && \
+    echo "✓ All required model files verified"
 
 RUN chmod +x /entrypoint.sh
 

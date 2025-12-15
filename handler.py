@@ -856,8 +856,8 @@ def handler(job):
                                                 if source_node_id not in prompt and source_node_id not in skipped_node_ids:
                                                     logger.warning(f"节点{node_id}.{input_name}: 源节点 {source_node_id} 不存在，跳过此输入")
                                                     # 不设置此输入，让ComfyUI使用默认值或报错
-                                                else:
-                                                    converted_inputs[input_name] = [source_node_id, source_output_index]
+                                            else:
+                                                converted_inputs[input_name] = [source_node_id, source_output_index]
                                         else:
                                             # 如果找不到 link，保持原值或设为 None
                                             logger.warning(f"节点{node_id}.{input_name}: 链接 {link_id} 在 links_map 中不存在")
@@ -1417,6 +1417,46 @@ def handler(job):
             prompt["59"]["inputs"]["clip_name"] = clip_vision_name
             logger.info(f"节点59 (CLIPVisionLoader): {clip_vision_name}")
         
+        # 节点 69: WanVideoLoraSelect (LoRA 选择器)
+        # workflow 中使用 "WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"
+        # Dockerfile 中已下载到 /ComfyUI/models/loras/WanVideo/Lightx2v/
+        if "69" in prompt:
+            # 尝试不同的路径格式
+            lora_candidates = [
+                "WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",  # 完整路径
+                "Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",  # 子目录格式
+                "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",  # 直接文件名
+            ]
+            
+            lora_model = None
+            for candidate in lora_candidates:
+                # 检查文件是否存在
+                if candidate.startswith("WanVideo/"):
+                    full_path = f"/ComfyUI/models/loras/{candidate}"
+                elif "/" in candidate:
+                    full_path = f"/ComfyUI/models/loras/{candidate}"
+                else:
+                    full_path = f"/ComfyUI/models/loras/WanVideo/Lightx2v/{candidate}"
+                
+                if os.path.exists(full_path):
+                    lora_model = candidate
+                    logger.info(f"找到 LoRA 模型: {full_path}")
+                    break
+            
+            # 如果找不到，使用workflow中的默认路径
+            if not lora_model:
+                lora_model = "WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"
+                logger.warning(f"LoRA 模型文件不存在，使用默认路径: {lora_model}")
+            
+            if "widgets_values" in prompt["69"]:
+                widgets = prompt["69"]["widgets_values"]
+                if len(widgets) >= 1:
+                    widgets[0] = lora_model
+            if "inputs" not in prompt["69"]:
+                prompt["69"]["inputs"] = {}
+            prompt["69"]["inputs"]["lora"] = lora_model
+            logger.info(f"节点69 (WanVideoLoraSelect): {lora_model}")
+        
         # 节点 92: WanVideoTextEncodeCached (文本编码器)
         # workflow 中使用 "umt5-xxl-enc-bf16.safetensors"，路径正确
         if "92" in prompt:
@@ -1441,41 +1481,118 @@ def handler(job):
         
         # 节点 129: OnnxDetectionModelLoader (姿态检测模型)
         if "129" in prompt:
+            # 获取可用模型列表
+            try:
+                url = f"http://{server_address}:8188/object_info"
+                with urllib_request.urlopen(url, timeout=5) as response:
+                    object_info = json.loads(response.read())
+                    if "OnnxDetectionModelLoader" in object_info:
+                        loader_info = object_info["OnnxDetectionModelLoader"]
+                        available_vitpose = []
+                        available_yolo = []
+                        
+                        if "input" in loader_info and "required" in loader_info["input"]:
+                            if "vitpose_model" in loader_info["input"]["required"]:
+                                available_vitpose = loader_info["input"]["required"]["vitpose_model"]
+                                if isinstance(available_vitpose, list) and len(available_vitpose) > 0:
+                                    if isinstance(available_vitpose[0], list):
+                                        available_vitpose = available_vitpose[0]
+                                    available_vitpose = [m for m in available_vitpose if isinstance(m, str)]
+                            if "yolo_model" in loader_info["input"]["required"]:
+                                available_yolo = loader_info["input"]["required"]["yolo_model"]
+                                if isinstance(available_yolo, list) and len(available_yolo) > 0:
+                                    if isinstance(available_yolo[0], list):
+                                        available_yolo = available_yolo[0]
+                                    available_yolo = [m for m in available_yolo if isinstance(m, str)]
+                        
+                        logger.info(f"OnnxDetectionModelLoader 可用模型: vitpose={available_vitpose}, yolo={available_yolo}")
+            except Exception as e:
+                logger.warning(f"获取 OnnxDetectionModelLoader 模型列表失败: {e}")
+                available_vitpose = []
+                available_yolo = []
+            
             # 尝试不同的路径格式
             vitpose_candidates = [
+                "onnx/vitpose_h_wholebody_model.onnx",  # workflow 中的格式
                 "vitpose_h_wholebody_model.onnx",  # 直接文件名
-                "onnx/vitpose_h_wholebody_model.onnx",  # 子目录格式
             ]
             yolo_candidates = [
+                "onnx/yolov10m.onnx",  # workflow 中的格式
                 "yolov10m.onnx",  # 直接文件名
-                "onnx/yolov10m.onnx",  # 子目录格式
             ]
             
-            # 检查模型文件是否存在
+            # 检查模型文件是否存在，并匹配可用模型列表
             vitpose_model = None
             yolo_model = None
             
-            for candidate in vitpose_candidates:
-                full_path = f"/ComfyUI/models/onnx/{candidate.replace('onnx/', '')}"
-                if os.path.exists(full_path):
-                    vitpose_model = candidate
-                    logger.info(f"找到 ViTPose 模型: {full_path}")
-                    break
+            # 优先从可用模型列表中选择
+            if available_vitpose:
+                for candidate in vitpose_candidates:
+                    # 检查完整路径或文件名匹配
+                    for available in available_vitpose:
+                        if candidate == available or candidate.endswith(available) or available.endswith(candidate):
+                            vitpose_model = available
+                            logger.info(f"从可用列表中选择 ViTPose 模型: {vitpose_model}")
+                            break
+                    if vitpose_model:
+                        break
             
-            for candidate in yolo_candidates:
-                full_path = f"/ComfyUI/models/onnx/{candidate.replace('onnx/', '')}"
-                if os.path.exists(full_path):
-                    yolo_model = candidate
-                    logger.info(f"找到 YOLO 模型: {full_path}")
-                    break
-            
-            # 如果找不到，使用默认路径（让ComfyUI尝试）
+            # 如果列表中没有，尝试文件系统
             if not vitpose_model:
-                vitpose_model = "vitpose_h_wholebody_model.onnx"
-                logger.warning(f"ViTPose 模型文件不存在，使用默认路径: {vitpose_model}")
+                for candidate in vitpose_candidates:
+                    file_name = candidate.replace('onnx/', '')
+                    full_path = f"/ComfyUI/models/onnx/{file_name}"
+                    if os.path.exists(full_path):
+                        # 检查是否在可用列表中
+                        if available_vitpose and file_name in available_vitpose:
+                            vitpose_model = file_name
+                        elif available_vitpose and any(file_name in m or m in file_name for m in available_vitpose):
+                            vitpose_model = next((m for m in available_vitpose if file_name in m or m in file_name), candidate)
+                        else:
+                            vitpose_model = candidate
+                        logger.info(f"找到 ViTPose 模型文件: {full_path}, 使用: {vitpose_model}")
+                        break
+            
+            if available_yolo:
+                for candidate in yolo_candidates:
+                    for available in available_yolo:
+                        if candidate == available or candidate.endswith(available) or available.endswith(candidate):
+                            yolo_model = available
+                            logger.info(f"从可用列表中选择 YOLO 模型: {yolo_model}")
+                            break
+                    if yolo_model:
+                        break
+            
             if not yolo_model:
-                yolo_model = "yolov10m.onnx"
-                logger.warning(f"YOLO 模型文件不存在，使用默认路径: {yolo_model}")
+                for candidate in yolo_candidates:
+                    file_name = candidate.replace('onnx/', '')
+                    full_path = f"/ComfyUI/models/onnx/{file_name}"
+                    if os.path.exists(full_path):
+                        if available_yolo and file_name in available_yolo:
+                            yolo_model = file_name
+                        elif available_yolo and any(file_name in m or m in file_name for m in available_yolo):
+                            yolo_model = next((m for m in available_yolo if file_name in m or m in file_name), candidate)
+                        else:
+                            yolo_model = candidate
+                        logger.info(f"找到 YOLO 模型文件: {full_path}, 使用: {yolo_model}")
+                        break
+            
+            # 如果找不到，使用可用列表中的第一个或默认路径
+            if not vitpose_model:
+                if available_vitpose:
+                    vitpose_model = available_vitpose[0]
+                    logger.info(f"使用可用列表中的第一个 ViTPose 模型: {vitpose_model}")
+                else:
+                    vitpose_model = "vitpose_h_wholebody_model.onnx"
+                    logger.warning(f"ViTPose 模型文件不存在，使用默认路径: {vitpose_model}")
+            
+            if not yolo_model:
+                if available_yolo:
+                    yolo_model = available_yolo[0]
+                    logger.info(f"使用可用列表中的第一个 YOLO 模型: {yolo_model}")
+                else:
+                    yolo_model = "yolov10m.onnx"
+                    logger.warning(f"YOLO 模型文件不存在，使用默认路径: {yolo_model}")
             
             if "widgets_values" in prompt["129"]:
                 widgets = prompt["129"]["widgets_values"]
@@ -1488,6 +1605,159 @@ def handler(job):
             prompt["129"]["inputs"]["vitpose_model"] = vitpose_model
             prompt["129"]["inputs"]["yolo_model"] = yolo_model
             logger.info(f"节点129 (OnnxDetectionModelLoader): vitpose={vitpose_model}, yolo={yolo_model}")
+        
+        # 节点 65: WanVideoClipVisionEncode (CLIP Vision 编码 - 用于节点63)
+        # 确保必需的输入连接存在
+        if "65" in prompt:
+            if "inputs" not in prompt["65"]:
+                prompt["65"]["inputs"] = {}
+            
+            # clip_vision 来自节点128 (GetNode "clip_vision") -> 节点106 (SetNode "clip_vision") -> 节点59 (CLIPVisionLoader)
+            if "clip_vision" not in prompt["65"]["inputs"] or prompt["65"]["inputs"]["clip_vision"] is None:
+                if "59" in prompt:
+                    prompt["65"]["inputs"]["clip_vision"] = ["59", 0]
+                    logger.info(f"节点65: 修复 clip_vision 输入 = ['59', 0]")
+                else:
+                    logger.error(f"节点65: 缺少节点59 (CLIPVisionLoader)，无法设置 clip_vision 输入")
+            
+            # image_1 来自节点96 (SetNode "start_frame") -> 节点68 (ImageResizeKJv2) -> 节点76 (LoadImage)
+            if "image_1" not in prompt["65"]["inputs"] or prompt["65"]["inputs"]["image_1"] is None:
+                if "68" in prompt:
+                    prompt["65"]["inputs"]["image_1"] = ["68", 0]
+                    logger.info(f"节点65: 修复 image_1 输入 = ['68', 0]")
+                elif "76" in prompt:
+                    prompt["65"]["inputs"]["image_1"] = ["76", 0]
+                    logger.info(f"节点65: 修复 image_1 输入 = ['76', 0]")
+                else:
+                    logger.error(f"节点65: 缺少节点68或76，无法设置 image_1 输入")
+            
+            logger.info(f"节点65 (WanVideoClipVisionEncode): clip_vision={prompt['65']['inputs'].get('clip_vision')}, image_1={prompt['65']['inputs'].get('image_1')}")
+        
+        # 节点 82: WanVideoClipVisionEncode (CLIP Vision 编码 - 用于节点71)
+        # 确保必需的输入连接存在
+        if "82" in prompt:
+            if "inputs" not in prompt["82"]:
+                prompt["82"]["inputs"] = {}
+            
+            # clip_vision 来自节点107 (GetNode "clip_vision") -> 节点106 (SetNode "clip_vision") -> 节点59 (CLIPVisionLoader)
+            if "clip_vision" not in prompt["82"]["inputs"] or prompt["82"]["inputs"]["clip_vision"] is None:
+                if "59" in prompt:
+                    prompt["82"]["inputs"]["clip_vision"] = ["59", 0]
+                    logger.info(f"节点82: 修复 clip_vision 输入 = ['59', 0]")
+                else:
+                    logger.error(f"节点82: 缺少节点59 (CLIPVisionLoader)，无法设置 clip_vision 输入")
+            
+            # image_1 来自节点81 (GetImageRangeFromBatch) -> 节点113 (SetNode "poses") -> 节点77 (ImageResizeKJv2)
+            if "image_1" not in prompt["82"]["inputs"] or prompt["82"]["inputs"]["image_1"] is None:
+                if "81" in prompt:
+                    prompt["82"]["inputs"]["image_1"] = ["81", 0]
+                    logger.info(f"节点82: 修复 image_1 输入 = ['81', 0]")
+                elif "77" in prompt:
+                    prompt["82"]["inputs"]["image_1"] = ["77", 0]
+                    logger.info(f"节点82: 修复 image_1 输入 = ['77', 0]")
+                else:
+                    logger.error(f"节点82: 缺少节点81或77，无法设置 image_1 输入")
+            
+            logger.info(f"节点82 (WanVideoClipVisionEncode): clip_vision={prompt['82']['inputs'].get('clip_vision')}, image_1={prompt['82']['inputs'].get('image_1')}")
+        
+        # 节点 81: GetImageRangeFromBatch (从批次中获取图像范围)
+        # 确保必需的输入连接存在
+        if "81" in prompt:
+            if "inputs" not in prompt["81"]:
+                prompt["81"]["inputs"] = {}
+            
+            # images 来自节点113 (SetNode "poses") -> 节点77 (ImageResizeKJv2) -> 节点130 (PoseDetectionOneToAllAnimation)
+            if "images" not in prompt["81"]["inputs"] or prompt["81"]["inputs"]["images"] is None:
+                if "77" in prompt:
+                    prompt["81"]["inputs"]["images"] = ["77", 0]
+                    logger.info(f"节点81: 修复 images 输入 = ['77', 0]")
+                elif "130" in prompt:
+                    prompt["81"]["inputs"]["images"] = ["130", 0]
+                    logger.info(f"节点81: 修复 images 输入 = ['130', 0]")
+                else:
+                    logger.error(f"节点81: 缺少节点77或130，无法设置 images 输入")
+            
+            logger.info(f"节点81 (GetImageRangeFromBatch): images={prompt['81']['inputs'].get('images')}")
+        
+        # 节点 72: WanVideoEncode (VAE 编码)
+        # 确保必需的输入连接存在
+        if "72" in prompt:
+            if "inputs" not in prompt["72"]:
+                prompt["72"]["inputs"] = {}
+            
+            # image 来自节点113 (SetNode "poses") -> 节点77 (ImageResizeKJv2) -> 节点130 (PoseDetectionOneToAllAnimation)
+            if "image" not in prompt["72"]["inputs"] or prompt["72"]["inputs"]["image"] is None:
+                if "77" in prompt:
+                    prompt["72"]["inputs"]["image"] = ["77", 0]
+                    logger.info(f"节点72: 修复 image 输入 = ['77', 0]")
+                elif "130" in prompt:
+                    prompt["72"]["inputs"]["image"] = ["130", 0]
+                    logger.info(f"节点72: 修复 image 输入 = ['130', 0]")
+                else:
+                    logger.error(f"节点72: 缺少节点77或130，无法设置 image 输入")
+            
+            # vae 来自节点112 (GetNode "VAE") -> 节点116 (GetNode "VAE") -> 节点38 (WanVideoVAELoader)
+            if "vae" not in prompt["72"]["inputs"] or prompt["72"]["inputs"]["vae"] is None:
+                if "38" in prompt:
+                    prompt["72"]["inputs"]["vae"] = ["38", 0]
+                    logger.info(f"节点72: 修复 vae 输入 = ['38', 0]")
+                else:
+                    logger.error(f"节点72: 缺少节点38 (WanVideoVAELoader)，无法设置 vae 输入")
+            
+            logger.info(f"节点72 (WanVideoEncode): image={prompt['72']['inputs'].get('image')}, vae={prompt['72']['inputs'].get('vae')}")
+        
+        # 节点 130: PoseDetectionOneToAllAnimation (姿态检测) - 必须在节点129之后
+        # 确保必需的输入连接存在
+        if "130" in prompt:
+            if "inputs" not in prompt["130"]:
+                prompt["130"]["inputs"] = {}
+            
+            # 确保 model 输入存在 (来自节点129)
+            if "model" not in prompt["130"]["inputs"] or prompt["130"]["inputs"]["model"] is None:
+                if "129" in prompt:
+                    prompt["130"]["inputs"]["model"] = ["129", 0]
+                    logger.info(f"节点130: 修复 model 输入 = ['129', 0]")
+                else:
+                    logger.error(f"节点130: 缺少节点129 (OnnxDetectionModelLoader)，无法设置 model 输入")
+            
+            # 确保 images 输入存在 (来自节点91)
+            if "images" not in prompt["130"]["inputs"] or prompt["130"]["inputs"]["images"] is None:
+                if "91" in prompt:
+                    prompt["130"]["inputs"]["images"] = ["91", 0]
+                    logger.info(f"节点130: 修复 images 输入 = ['91', 0]")
+                else:
+                    logger.error(f"节点130: 缺少节点91 (GetImageSizeAndCount)，无法设置 images 输入")
+            
+            # 设置 width 和 height
+            if "width" not in prompt["130"]["inputs"] or prompt["130"]["inputs"]["width"] is None:
+                prompt["130"]["inputs"]["width"] = adjusted_width
+            if "height" not in prompt["130"]["inputs"] or prompt["130"]["inputs"]["height"] is None:
+                prompt["130"]["inputs"]["height"] = adjusted_height
+            
+            logger.info(f"节点130 (PoseDetectionOneToAllAnimation): model={prompt['130']['inputs'].get('model')}, images={prompt['130']['inputs'].get('images')}, width={adjusted_width}, height={adjusted_height}")
+        
+        # 节点 70: WanVideoSetBlockSwap - 确保model输入存在
+        if "70" in prompt:
+            if "inputs" not in prompt["70"]:
+                prompt["70"]["inputs"] = {}
+            
+            # 确保 model 输入存在 (来自节点22)
+            if "model" not in prompt["70"]["inputs"] or prompt["70"]["inputs"]["model"] is None:
+                if "22" in prompt:
+                    prompt["70"]["inputs"]["model"] = ["22", 0]
+                    logger.info(f"节点70: 修复 model 输入 = ['22', 0]")
+                else:
+                    logger.error(f"节点70: 缺少节点22 (WanVideoModelLoader)，无法设置 model 输入")
+            
+            # 确保 block_swap_args 输入存在 (来自节点39)
+            if "block_swap_args" not in prompt["70"]["inputs"] or prompt["70"]["inputs"]["block_swap_args"] is None:
+                if "39" in prompt:
+                    prompt["70"]["inputs"]["block_swap_args"] = ["39", 0]
+                    logger.info(f"节点70: 修复 block_swap_args 输入 = ['39', 0]")
+                else:
+                    logger.error(f"节点70: 缺少节点39 (WanVideoBlockSwap)，无法设置 block_swap_args 输入")
+            
+            logger.info(f"节点70 (WanVideoSetBlockSwap): model={prompt['70']['inputs'].get('model')}, block_swap_args={prompt['70']['inputs'].get('block_swap_args')}")
         
         # 节点 63: WanVideoImageToVideoEncode (图像编码)
         # widgets_values 格式: [width, height, num_frames, noise_aug_strength, start_latent_strength, end_latent_strength, force_offload, fun_or_fl2v_model, tiled_vae, augment_empty_frames]
@@ -1604,6 +1874,25 @@ def handler(job):
             prompt["119"]["inputs"]["cfg"] = cfg  # 通过链接传递
             prompt["119"]["inputs"]["shift"] = shift
             prompt["119"]["inputs"]["seed"] = seed  # 通过链接传递
+            
+            # 确保 scheduler 输入存在 (来自节点122)
+            if "scheduler" not in prompt["119"]["inputs"] or prompt["119"]["inputs"]["scheduler"] is None:
+                if "122" in prompt:
+                    prompt["119"]["inputs"]["scheduler"] = ["122", 3]  # scheduler是节点122的第4个输出(索引3)
+                    logger.info(f"节点119: 修复 scheduler 输入 = ['122', 3]")
+                else:
+                    # 如果节点122不存在，直接使用scheduler值
+                    prompt["119"]["inputs"]["scheduler"] = scheduler
+                    logger.info(f"节点119: 使用直接值 scheduler = {scheduler}")
+            
+            # 确保 image_embeds 输入存在 (来自节点71)
+            if "image_embeds" not in prompt["119"]["inputs"] or prompt["119"]["inputs"]["image_embeds"] is None:
+                if "71" in prompt:
+                    prompt["119"]["inputs"]["image_embeds"] = ["71", 0]
+                    logger.info(f"节点119: 修复 image_embeds 输入 = ['71', 0]")
+                else:
+                    logger.error(f"节点119: 缺少节点71 (WanVideoAddSteadyDancerEmbeds)，无法设置 image_embeds 输入")
+            
             # 确保 rope_function 是字符串，不是布尔值
             if "rope_function" not in prompt["119"]["inputs"] or prompt["119"]["inputs"]["rope_function"] == False or prompt["119"]["inputs"]["rope_function"] == "False":
                 prompt["119"]["inputs"]["rope_function"] = "comfy"  # 默认值
@@ -1619,7 +1908,7 @@ def handler(job):
                     prompt["119"]["inputs"]["riflex_freq_index"] = int(prompt["119"]["inputs"]["riflex_freq_index"])
                 except (ValueError, TypeError):
                     prompt["119"]["inputs"]["riflex_freq_index"] = 0
-            logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}, rope_function={prompt['119']['inputs'].get('rope_function', 'comfy')}")
+            logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}, scheduler={prompt['119']['inputs'].get('scheduler')}, image_embeds={prompt['119']['inputs'].get('image_embeds')}, rope_function={prompt['119']['inputs'].get('rope_function', 'comfy')}")
         
         # 节点 122: WanVideoScheduler (调度器)
         if "122" in prompt:
@@ -1895,6 +2184,27 @@ def handler(job):
                 logger.info(f"✓ 节点130 (PoseDetectionOneToAllAnimation): width={width_130}, height={height_130}")
             else:
                 logger.warning("✗ 节点130 缺少 inputs")
+        if "65" in prompt:
+            if "inputs" in prompt["65"]:
+                clip_vision_65 = prompt["65"]["inputs"].get("clip_vision")
+                image_1_65 = prompt["65"]["inputs"].get("image_1")
+                logger.info(f"✓ 节点65 (WanVideoClipVisionEncode): clip_vision={'已设置' if clip_vision_65 else '未设置'}, image_1={'已设置' if image_1_65 else '未设置'}")
+            else:
+                logger.warning("✗ 节点65 缺少 inputs")
+        if "82" in prompt:
+            if "inputs" in prompt["82"]:
+                clip_vision_82 = prompt["82"]["inputs"].get("clip_vision")
+                image_1_82 = prompt["82"]["inputs"].get("image_1")
+                logger.info(f"✓ 节点82 (WanVideoClipVisionEncode): clip_vision={'已设置' if clip_vision_82 else '未设置'}, image_1={'已设置' if image_1_82 else '未设置'}")
+            else:
+                logger.warning("✗ 节点82 缺少 inputs")
+        if "72" in prompt:
+            if "inputs" in prompt["72"]:
+                image_72 = prompt["72"]["inputs"].get("image")
+                vae_72 = prompt["72"]["inputs"].get("vae")
+                logger.info(f"✓ 节点72 (WanVideoEncode): image={'已设置' if image_72 else '未设置'}, vae={'已设置' if vae_72 else '未设置'}")
+            else:
+                logger.warning("✗ 节点72 缺少 inputs")
     elif is_mega_model:
         # RapidAIO Mega (V2.5).json 验证
         if "597" in prompt and "widgets_values" in prompt["597"]:
