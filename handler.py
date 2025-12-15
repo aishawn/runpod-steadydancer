@@ -168,13 +168,24 @@ def get_videos(ws, prompt, is_mega_model=False):
                 error_type = error_data.get('type', '')
                 node_id = error_data.get('node_id', '')
                 
+                # 输出完整的错误信息（用于调试）
+                logger.error("=" * 60)
+                logger.error(f"❌ 执行错误 - 节点: {node_id}")
+                logger.error(f"   错误类型: {error_type}")
+                logger.error(f"   错误信息: {error_info}")
+                logger.error(f"   完整错误数据: {error_data}")
+                
                 # 检查是否是 OOM 错误
                 if 'OutOfMemoryError' in str(error_info) or 'OOM' in str(error_info):
-                    logger.error(f"❌ GPU 内存不足 (OOM) 错误 - 节点: {node_id}, 类型: {error_type}")
-                    logger.error(f"错误详情: {error_info}")
-                    logger.error("建议: 1) 减小图像分辨率 (width/height) 2) 减少帧数 (length) 3) 缩短提示词长度")
+                    logger.error("   错误类型: GPU 内存不足 (OOM)")
+                    logger.error("   建议解决方案:")
+                    logger.error("     1. 减小图像分辨率 (width/height)")
+                    logger.error("     2. 减少帧数 (length)")
+                    logger.error("     3. 缩短提示词长度")
                 else:
-                    logger.error(f"Execution error received - 节点: {node_id}, 类型: {error_type}, 错误: {error_info}")
+                    logger.error(f"   错误类型: 执行错误")
+                    logger.error(f"   建议: 检查节点 {node_id} 的输入连接和配置")
+                logger.error("=" * 60)
         else:
             continue
 
@@ -2152,6 +2163,23 @@ def handler(job):
                 except (ValueError, TypeError):
                     prompt["119"]["inputs"]["riflex_freq_index"] = 0
             logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}, scheduler={prompt['119']['inputs'].get('scheduler')}, image_embeds={prompt['119']['inputs'].get('image_embeds')}, rope_function={prompt['119']['inputs'].get('rope_function', 'comfy')}")
+        
+        # 节点 118: WanVideoSamplerFromSettings (从设置采样)
+        # 节点 118 的输入 sampler_inputs 来自节点 119 的输出
+        if "118" in prompt:
+            if "inputs" not in prompt["118"]:
+                prompt["118"]["inputs"] = {}
+            
+            # 检查并修复 sampler_inputs 输入连接（来自节点 119）
+            sampler_inputs = prompt["118"]["inputs"].get("sampler_inputs")
+            if not sampler_inputs or sampler_inputs is None:
+                if "119" in prompt:
+                    prompt["118"]["inputs"]["sampler_inputs"] = ["119", 0]
+                    logger.info(f"🔧 节点118: 修复 sampler_inputs 输入 = ['119', 0]")
+                else:
+                    logger.error(f"❌ 节点118: 缺少 sampler_inputs 输入，且节点 119 不存在，节点 118 无法执行")
+            else:
+                logger.info(f"✅ 节点118 (WanVideoSamplerFromSettings): sampler_inputs={sampler_inputs}")
         
         # 节点 122: WanVideoScheduler (调度器)
         if "122" in prompt:
