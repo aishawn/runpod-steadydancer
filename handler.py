@@ -856,8 +856,8 @@ def handler(job):
                                                 if source_node_id not in prompt and source_node_id not in skipped_node_ids:
                                                     logger.warning(f"节点{node_id}.{input_name}: 源节点 {source_node_id} 不存在，跳过此输入")
                                                     # 不设置此输入，让ComfyUI使用默认值或报错
-                                            else:
-                                                converted_inputs[input_name] = [source_node_id, source_output_index]
+                                                else:
+                                                    converted_inputs[input_name] = [source_node_id, source_output_index]
                                         else:
                                             # 如果找不到 link，保持原值或设为 None
                                             logger.warning(f"节点{node_id}.{input_name}: 链接 {link_id} 在 links_map 中不存在")
@@ -1706,6 +1706,38 @@ def handler(job):
             
             logger.info(f"节点72 (WanVideoEncode): image={prompt['72']['inputs'].get('image')}, vae={prompt['72']['inputs'].get('vae')}")
         
+        # 节点 71: WanVideoAddSteadyDancerEmbeds (添加 SteadyDancer 嵌入)
+        # 确保必需的输入连接存在
+        if "71" in prompt:
+            if "inputs" not in prompt["71"]:
+                prompt["71"]["inputs"] = {}
+            
+            # embeds 来自节点63 (WanVideoImageToVideoEncode) 的输出
+            if "embeds" not in prompt["71"]["inputs"] or prompt["71"]["inputs"]["embeds"] is None:
+                if "63" in prompt:
+                    prompt["71"]["inputs"]["embeds"] = ["63", 0]
+                    logger.info(f"节点71: 修复 embeds 输入 = ['63', 0]")
+                else:
+                    logger.error(f"节点71: 缺少节点63 (WanVideoImageToVideoEncode)，无法设置 embeds 输入")
+            
+            # pose_latents_positive 来自节点72 (WanVideoEncode) 的输出
+            if "pose_latents_positive" not in prompt["71"]["inputs"] or prompt["71"]["inputs"]["pose_latents_positive"] is None:
+                if "72" in prompt:
+                    prompt["71"]["inputs"]["pose_latents_positive"] = ["72", 0]
+                    logger.info(f"节点71: 修复 pose_latents_positive 输入 = ['72', 0]")
+                else:
+                    logger.error(f"节点71: 缺少节点72 (WanVideoEncode)，无法设置 pose_latents_positive 输入")
+            
+            # clip_vision_embeds 来自节点82 (WanVideoClipVisionEncode) 的输出
+            if "clip_vision_embeds" not in prompt["71"]["inputs"] or prompt["71"]["inputs"]["clip_vision_embeds"] is None:
+                if "82" in prompt:
+                    prompt["71"]["inputs"]["clip_vision_embeds"] = ["82", 0]
+                    logger.info(f"节点71: 修复 clip_vision_embeds 输入 = ['82', 0]")
+                else:
+                    logger.error(f"节点71: 缺少节点82 (WanVideoClipVisionEncode)，无法设置 clip_vision_embeds 输入")
+            
+            logger.info(f"节点71 (WanVideoAddSteadyDancerEmbeds): embeds={prompt['71']['inputs'].get('embeds')}, pose_latents_positive={prompt['71']['inputs'].get('pose_latents_positive')}, clip_vision_embeds={prompt['71']['inputs'].get('clip_vision_embeds')}")
+        
         # 节点 130: PoseDetectionOneToAllAnimation (姿态检测) - 必须在节点129之后
         # 确保必需的输入连接存在
         if "130" in prompt:
@@ -1773,10 +1805,38 @@ def handler(job):
                     widgets[2] = length  # num_frames
             if "inputs" not in prompt["63"]:
                 prompt["63"]["inputs"] = {}
+            
+            # clip_embeds 来自节点65 (WanVideoClipVisionEncode) 的输出
+            if "clip_embeds" not in prompt["63"]["inputs"] or prompt["63"]["inputs"]["clip_embeds"] is None:
+                if "65" in prompt:
+                    prompt["63"]["inputs"]["clip_embeds"] = ["65", 0]
+                    logger.info(f"节点63: 修复 clip_embeds 输入 = ['65', 0]")
+                else:
+                    logger.error(f"节点63: 缺少节点65 (WanVideoClipVisionEncode)，无法设置 clip_embeds 输入")
+            
+            # start_image 来自节点96 (SetNode "start_frame") -> 节点68 (ImageResizeKJv2)
+            if "start_image" not in prompt["63"]["inputs"] or prompt["63"]["inputs"]["start_image"] is None:
+                if "68" in prompt:
+                    prompt["63"]["inputs"]["start_image"] = ["68", 0]
+                    logger.info(f"节点63: 修复 start_image 输入 = ['68', 0]")
+                elif "76" in prompt:
+                    prompt["63"]["inputs"]["start_image"] = ["76", 0]
+                    logger.info(f"节点63: 修复 start_image 输入 = ['76', 0]")
+                else:
+                    logger.error(f"节点63: 缺少节点68或76，无法设置 start_image 输入")
+            
+            # vae 来自节点116 (GetNode "VAE") -> 节点38 (WanVideoVAELoader)
+            if "vae" not in prompt["63"]["inputs"] or prompt["63"]["inputs"]["vae"] is None:
+                if "38" in prompt:
+                    prompt["63"]["inputs"]["vae"] = ["38", 0]
+                    logger.info(f"节点63: 修复 vae 输入 = ['38', 0]")
+                else:
+                    logger.error(f"节点63: 缺少节点38 (WanVideoVAELoader)，无法设置 vae 输入")
+            
             prompt["63"]["inputs"]["width"] = adjusted_width
             prompt["63"]["inputs"]["height"] = adjusted_height
             prompt["63"]["inputs"]["num_frames"] = length
-            logger.info(f"节点63 (WanVideoImageToVideoEncode): width={adjusted_width}, height={adjusted_height}, num_frames={length}")
+            logger.info(f"节点63 (WanVideoImageToVideoEncode): width={adjusted_width}, height={adjusted_height}, num_frames={length}, clip_embeds={prompt['63']['inputs'].get('clip_embeds')}, start_image={prompt['63']['inputs'].get('start_image')}, vae={prompt['63']['inputs'].get('vae')}")
         
         # 节点 68: ImageResizeKJv2 (图像尺寸调整)
         if "68" in prompt:
@@ -2113,7 +2173,10 @@ def handler(job):
                 width_63 = prompt["63"]["inputs"].get("width")
                 height_63 = prompt["63"]["inputs"].get("height")
                 num_frames_63 = prompt["63"]["inputs"].get("num_frames")
-                logger.info(f"✓ 节点63 (WanVideoImageToVideoEncode): width={width_63}, height={height_63}, num_frames={num_frames_63}")
+                clip_embeds_63 = prompt["63"]["inputs"].get("clip_embeds")
+                start_image_63 = prompt["63"]["inputs"].get("start_image")
+                vae_63 = prompt["63"]["inputs"].get("vae")
+                logger.info(f"✓ 节点63 (WanVideoImageToVideoEncode): width={width_63}, height={height_63}, num_frames={num_frames_63}, clip_embeds={'已设置' if clip_embeds_63 else '未设置'}, start_image={'已设置' if start_image_63 else '未设置'}, vae={'已设置' if vae_63 else '未设置'}")
             else:
                 logger.warning("✗ 节点63 缺少 inputs")
         if "68" in prompt:
@@ -2205,6 +2268,14 @@ def handler(job):
                 logger.info(f"✓ 节点72 (WanVideoEncode): image={'已设置' if image_72 else '未设置'}, vae={'已设置' if vae_72 else '未设置'}")
             else:
                 logger.warning("✗ 节点72 缺少 inputs")
+        if "71" in prompt:
+            if "inputs" in prompt["71"]:
+                embeds_71 = prompt["71"]["inputs"].get("embeds")
+                pose_latents_71 = prompt["71"]["inputs"].get("pose_latents_positive")
+                clip_vision_embeds_71 = prompt["71"]["inputs"].get("clip_vision_embeds")
+                logger.info(f"✓ 节点71 (WanVideoAddSteadyDancerEmbeds): embeds={'已设置' if embeds_71 else '未设置'}, pose_latents_positive={'已设置' if pose_latents_71 else '未设置'}, clip_vision_embeds={'已设置' if clip_vision_embeds_71 else '未设置'}")
+            else:
+                logger.warning("✗ 节点71 缺少 inputs")
     elif is_mega_model:
         # RapidAIO Mega (V2.5).json 验证
         if "597" in prompt and "widgets_values" in prompt["597"]:
