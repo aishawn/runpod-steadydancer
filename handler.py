@@ -220,9 +220,15 @@ def get_videos(ws, prompt, is_mega_model=False):
             for video in video_list:
                 # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩
                 if 'fullpath' in video:
-                    with open(video['fullpath'], 'rb') as f:
-                        video_data = base64.b64encode(f.read()).decode('utf-8')
-                    videos_output.append(video_data)
+                    video_path = video['fullpath']
+                    # 检查文件是否存在（save_output=False 的节点不会保存文件）
+                    if os.path.exists(video_path):
+                        with open(video_path, 'rb') as f:
+                            video_data = base64.b64encode(f.read()).decode('utf-8')
+                        videos_output.append(video_data)
+                        logger.info(f"✅ 节点 {node_id} 生成视频: {video_path}")
+                    else:
+                        logger.warning(f"⚠️ 节点 {node_id} 视频文件不存在（可能 save_output=False）: {video_path}")
                 elif 'filename' in video:
                     # 如果没有 fullpath，尝试使用 filename 和 subfolder
                     subfolder = video.get('subfolder', '')
@@ -232,8 +238,9 @@ def get_videos(ws, prompt, is_mega_model=False):
                         video_bytes = get_image(filename, subfolder, folder_type)
                         video_data = base64.b64encode(video_bytes).decode('utf-8')
                         videos_output.append(video_data)
+                        logger.info(f"✅ 节点 {node_id} 生成视频: {filename}")
                     except Exception as e:
-                        logger.warning(f"无法读取视频文件 {filename}: {e}")
+                        logger.warning(f"⚠️ 无法读取节点 {node_id} 的视频文件 {filename}: {e}")
         output_videos[node_id] = videos_output
 
     return output_videos
@@ -2119,34 +2126,51 @@ def handler(job):
                 prompt["124"]["inputs"] = {}
             prompt["124"]["inputs"]["seed"] = seed
         
-        # 节点 83: VHS_VideoCombine (输出视频)
+        # 节点 83: VHS_VideoCombine (输出视频 - 最终的跳舞视频)
         if "83" in prompt:
+            frame_rate = job_input.get("frame_rate", 24)
+            filename_prefix = job_input.get("filename_prefix", "WanVideoWrapper_SteadyDancer")
+            video_format = job_input.get("format", "video/h264-mp4")
+            
             if "widgets_values" in prompt["83"]:
                 widgets = prompt["83"]["widgets_values"]
                 if isinstance(widgets, dict):
-                    widgets["frame_rate"] = job_input.get("frame_rate", 24)
-                    widgets["filename_prefix"] = job_input.get("filename_prefix", "WanVideoWrapper_SteadyDancer")
-                    widgets["format"] = job_input.get("format", "video/h264-mp4")
+                    widgets["frame_rate"] = frame_rate
+                    widgets["filename_prefix"] = filename_prefix
+                    widgets["format"] = video_format
                     widgets["save_output"] = True
+            
+            # 确保 inputs 存在并设置所有必需参数
             if "inputs" not in prompt["83"]:
                 prompt["83"]["inputs"] = {}
-            prompt["83"]["inputs"]["frame_rate"] = job_input.get("frame_rate", 24)
-            prompt["83"]["inputs"]["filename_prefix"] = job_input.get("filename_prefix", "WanVideoWrapper_SteadyDancer")
-            prompt["83"]["inputs"]["format"] = job_input.get("format", "video/h264-mp4")
+            prompt["83"]["inputs"]["frame_rate"] = frame_rate
+            prompt["83"]["inputs"]["filename_prefix"] = filename_prefix
+            prompt["83"]["inputs"]["format"] = video_format
             prompt["83"]["inputs"]["save_output"] = True
-            logger.info(f"节点83 (VHS_VideoCombine): frame_rate={job_input.get('frame_rate', 24)}, filename_prefix={job_input.get('filename_prefix', 'WanVideoWrapper_SteadyDancer')}")
+            
+            # 检查输入连接是否正确
+            images_input = prompt["83"]["inputs"].get("images")
+            logger.info(f"✅ 节点83 (VHS_VideoCombine - 最终视频): frame_rate={frame_rate}, filename_prefix={filename_prefix}, format={video_format}, save_output=True")
+            logger.info(f"   images 输入: {images_input}")
         
-        # 节点 117: VHS_VideoCombine (姿态检测视频 - 仅用于预览，不输出)
+        # 节点 117: VHS_VideoCombine (姿态检测视频 - 完全禁用输出)
         # 确保节点 117 不输出视频文件，只使用节点 83 的输出
         if "117" in prompt:
+            # 设置 widgets_values (如果存在)
             if "widgets_values" in prompt["117"]:
                 widgets = prompt["117"]["widgets_values"]
                 if isinstance(widgets, dict):
                     widgets["save_output"] = False
+                    # 同时设置 format 为 image/gif 以减少内存占用
+                    widgets["format"] = "image/gif"
+            
+            # 确保 inputs 存在并设置 save_output = False
             if "inputs" not in prompt["117"]:
                 prompt["117"]["inputs"] = {}
             prompt["117"]["inputs"]["save_output"] = False
-            logger.info(f"节点117 (VHS_VideoCombine - 姿态视频): save_output=False (不输出文件，仅用于预览)")
+            prompt["117"]["inputs"]["format"] = "image/gif"  # 减少内存占用
+            
+            logger.info(f"🚫 节点117 (VHS_VideoCombine - 姿态视频): save_output=False, format=image/gif (完全禁用视频输出)")
         
         # 节点 130: PoseDetectionOneToAllAnimation (姿态检测)
         if "130" in prompt:
@@ -2491,16 +2515,32 @@ def handler(job):
         videos = get_videos(ws, prompt, is_mega_model or use_steadydancer)
         ws.close()
 
-        # SteadyDancer workflow: 优先返回节点 83 的最终视频（而不是节点 117 的姿态视频）
+        # 调试：打印所有返回的视频节点
+        logger.info(f"📹 get_videos 返回的节点: {list(videos.keys())}")
+        for node_id in videos:
+            video_count = len(videos[node_id]) if videos[node_id] else 0
+            logger.info(f"  节点 {node_id}: {video_count} 个视频")
+
+        # SteadyDancer workflow: 只返回节点 83 的最终视频，如果没有则报错，绝不返回节点 117
         if use_steadydancer:
-            # 优先返回节点 83 的视频（最终生成的跳舞视频）
+            # 只检查节点 83 的视频（最终生成的跳舞视频）
             if "83" in videos and videos["83"]:
                 logger.info("✅ 返回节点 83 的最终生成视频（跳舞视频）")
                 return {"video": videos["83"][0]}
-            # 如果节点 83 没有视频，记录警告并尝试其他节点
-            logger.warning("⚠️ 节点 83 没有视频输出，尝试其他节点")
+            
+            # 节点 83 没有视频，直接返回错误（不返回任何其他节点的视频）
+            logger.error("❌ 节点 83 没有视频输出！")
+            logger.error(f"可用的节点: {list(videos.keys())}")
+            
+            # 检查是否有节点 117 的视频（用于错误提示）
+            if "117" in videos and videos["117"]:
+                logger.error("❌ 检测到节点 117（姿态视频），但节点 83（最终视频）未生成")
+                return {"error": "视频生成失败：只生成了姿态检测视频（节点 117），没有生成最终的跳舞视频（节点 83）。请检查工作流配置，确保节点 83 的 save_output=True 且输入连接正确。"}
+            else:
+                logger.error("❌ 节点 83 和节点 117 都没有视频输出")
+                return {"error": "视频生成失败：节点 83（最终视频）没有生成视频。请检查工作流执行日志。"}
         
-        # 对于其他 workflow 或 SteadyDancer 的备用方案，返回第一个找到的视频
+        # 对于其他 workflow，返回第一个找到的视频
         for node_id in videos:
             if videos[node_id]:
                 logger.info(f"返回节点 {node_id} 的视频")
