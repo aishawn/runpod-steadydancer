@@ -2817,4 +2817,252 @@ def handler(job):
         return {"error": error_message}
 
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+    import sys
+    import argparse
+    
+    # 检查是否以测试模式运行
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        # 测试模式：patch runpod.serverless.start 并运行测试
+        def _noop_start(*args, **kwargs):
+            """空函数，用于阻止 runpod serverless worker 自动启动"""
+            logger.info("⚠️  runpod.serverless.start 被调用，但已被禁用（测试模式）")
+            pass
+        
+        runpod.serverless.start = _noop_start
+        
+        # 测试函数
+        def test_steadydancer_basic():
+            """测试 SteadyDancer 基本功能"""
+            print("=" * 60)
+            print("测试 1: SteadyDancer 基本功能测试")
+            print("=" * 60)
+            
+            # 检查必需文件
+            image_path = "/example_image.png"
+            video_path = "/data/videos/00001/video.mp4"  # SteadyDancer 需要输入视频
+            
+            if not os.path.exists(image_path):
+                print(f"⚠️  图片文件不存在: {image_path}")
+                # 尝试使用 data/images 目录中的图片
+                data_image_path = "/data/images/00001.png"
+                if os.path.exists(data_image_path):
+                    image_path = data_image_path
+                    print(f"使用备用图片: {image_path}")
+                else:
+                    print("跳过此测试")
+                    return
+            
+            if not os.path.exists(video_path):
+                print(f"⚠️  视频文件不存在: {video_path}")
+                # 尝试使用 data/videos 目录中的其他视频
+                data_video_dir = "/data/videos"
+                if os.path.exists(data_video_dir):
+                    for subdir in os.listdir(data_video_dir):
+                        potential_video = os.path.join(data_video_dir, subdir, "video.mp4")
+                        if os.path.exists(potential_video):
+                            video_path = potential_video
+                            print(f"使用备用视频: {video_path}")
+                            break
+                    else:
+                        print("跳过此测试（未找到输入视频）")
+                        return
+                else:
+                    print("跳过此测试（未找到输入视频）")
+                    return
+            
+            job = {
+                "input": {
+                    "use_steadydancer": True,
+                    "image_path": image_path,
+                    "video_path": video_path,
+                    "prompt": "a person dancing",
+                    "negative_prompt": "",
+                    "seed": 42,
+                    "width": 480,
+                    "height": 832,
+                    "length": 81,
+                    "steps": 4,
+                    "cfg": 1.0,
+                    "shift": 5.0,
+                    "frame_rate": 24,
+                    "filename_prefix": "test_steadydancer"
+                }
+            }
+            
+            try:
+                result = handler(job)
+                print(f"\n✅ 测试完成!")
+                if "video" in result:
+                    video_b64 = result["video"]
+                    print(f"视频数据长度: {len(video_b64)} 字符")
+                    # 保存视频文件
+                    output_path = "test_steadydancer_output.mp4"
+                    with open(output_path, 'wb') as f:
+                        f.write(base64.b64decode(video_b64))
+                    print(f"📹 视频已保存到: {os.path.abspath(output_path)}")
+                elif "error" in result:
+                    print(f"❌ 错误: {result['error']}")
+            except Exception as e:
+                print(f"❌ 测试失败: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        def test_steadydancer_with_custom_params():
+            """测试 SteadyDancer 自定义参数"""
+            print("\n" + "=" * 60)
+            print("测试 2: SteadyDancer 自定义参数测试")
+            print("=" * 60)
+            
+            image_path = "/example_image.png"
+            video_path = "/data/videos/00001/video.mp4"
+            
+            if not os.path.exists(image_path):
+                data_image_path = "/data/images/00001.png"
+                if os.path.exists(data_image_path):
+                    image_path = data_image_path
+                else:
+                    print("跳过此测试")
+                    return
+            
+            if not os.path.exists(video_path):
+                data_video_dir = "/data/videos"
+                if os.path.exists(data_video_dir):
+                    for subdir in os.listdir(data_video_dir):
+                        potential_video = os.path.join(data_video_dir, subdir, "video.mp4")
+                        if os.path.exists(potential_video):
+                            video_path = potential_video
+                            break
+                    else:
+                        print("跳过此测试")
+                        return
+                else:
+                    print("跳过此测试")
+                    return
+            
+            job = {
+                "input": {
+                    "use_steadydancer": True,
+                    "image_path": image_path,
+                    "video_path": video_path,
+                    "prompt": "a person dancing gracefully",
+                    "negative_prompt": "blurry, low quality",
+                    "seed": 12345,
+                    "width": 512,
+                    "height": 768,
+                    "length": 49,  # 更短的视频用于快速测试
+                    "steps": 4,
+                    "cfg": 1.0,
+                    "shift": 5.0,
+                    "context_frames": 49,
+                    "context_stride": 4,
+                    "context_overlap": 16,
+                    "frame_rate": 24,
+                    "align_to": "ref",
+                    "draw_face_points": "weak",
+                    "draw_head": "full"
+                }
+            }
+            
+            try:
+                result = handler(job)
+                print(f"\n✅ 测试完成!")
+                if "video" in result:
+                    video_b64 = result["video"]
+                    print(f"视频数据长度: {len(video_b64)} 字符")
+                    output_path = "test_steadydancer_custom.mp4"
+                    with open(output_path, 'wb') as f:
+                        f.write(base64.b64decode(video_b64))
+                    print(f"📹 视频已保存到: {os.path.abspath(output_path)}")
+                elif "error" in result:
+                    print(f"❌ 错误: {result['error']}")
+            except Exception as e:
+                print(f"❌ 测试失败: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        def test_standard_workflow():
+            """测试标准 workflow（非 SteadyDancer）"""
+            print("\n" + "=" * 60)
+            print("测试 3: 标准 workflow 测试")
+            print("=" * 60)
+            
+            image_path = "/example_image.png"
+            if not os.path.exists(image_path):
+                data_image_path = "/data/images/00001.png"
+                if os.path.exists(data_image_path):
+                    image_path = data_image_path
+                else:
+                    print("跳过此测试")
+                    return
+            
+            job = {
+                "input": {
+                    "use_steadydancer": False,  # 使用标准 workflow
+                    "image_path": image_path,
+                    "prompt": "running man, grab the gun",
+                    "seed": 42,
+                    "width": 480,
+                    "height": 832,
+                    "length": 49,  # 更短的视频用于快速测试
+                    "steps": 4,
+                    "cfg": 1.0
+                }
+            }
+            
+            try:
+                result = handler(job)
+                print(f"\n✅ 测试完成!")
+                if "video" in result:
+                    video_b64 = result["video"]
+                    print(f"视频数据长度: {len(video_b64)} 字符")
+                    output_path = "test_standard_output.mp4"
+                    with open(output_path, 'wb') as f:
+                        f.write(base64.b64decode(video_b64))
+                    print(f"📹 视频已保存到: {os.path.abspath(output_path)}")
+                elif "error" in result:
+                    print(f"❌ 错误: {result['error']}")
+            except Exception as e:
+                print(f"❌ 测试失败: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        def main_test():
+            """运行所有测试"""
+            print("\n" + "=" * 60)
+            print("SteadyDancer Handler 功能测试")
+            print("=" * 60)
+            print("\n注意: 确保 ComfyUI 服务正在运行 (http://127.0.0.1:8188)")
+            print("如果未运行，请先启动 ComfyUI 服务\n")
+            
+            # 检查 ComfyUI 是否运行
+            try:
+                response = urllib_request.urlopen("http://127.0.0.1:8188/", timeout=5)
+                print("✅ ComfyUI 服务正在运行\n")
+            except Exception as e:
+                print(f"⚠️  ComfyUI 服务未运行: {e}")
+                print("请先启动 ComfyUI 服务\n")
+                return
+            
+            # 解析命令行参数
+            parser = argparse.ArgumentParser(description='测试 SteadyDancer handler')
+            parser.add_argument('test', nargs='?', choices=['all', 'steadydancer', 'custom', 'standard'], 
+                              default='all', help='要运行的测试 (默认: all)')
+            args = parser.parse_args(sys.argv[2:])
+            
+            # 运行测试
+            if args.test == 'all' or args.test == 'steadydancer':
+                test_steadydancer_basic()
+            if args.test == 'all' or args.test == 'custom':
+                test_steadydancer_with_custom_params()
+            if args.test == 'all' or args.test == 'standard':
+                test_standard_workflow()
+            
+            print("\n" + "=" * 60)
+            print("所有测试完成")
+            print("=" * 60)
+        
+        # 运行测试
+        main_test()
+    else:
+        # 正常模式：启动 RunPod serverless worker
+        runpod.serverless.start({"handler": handler})
