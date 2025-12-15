@@ -1509,19 +1509,26 @@ def handler(job):
                         
                         # 如果列表为空，尝试从文件系统扫描
                         if not available_vitpose or not available_yolo:
-                            detection_dirs = ["/ComfyUI/models/detection", "/ComfyUI/models/onnx"]
-                            for detection_dir in detection_dirs:
+                            detection_dirs = [
+                                ("/ComfyUI/models/detection", "detection"),
+                                ("/ComfyUI/models/onnx", "onnx")
+                            ]
+                            for detection_dir, prefix in detection_dirs:
                                 if os.path.exists(detection_dir):
                                     for file in os.listdir(detection_dir):
                                         if file.endswith('.onnx'):
                                             file_path = os.path.join(detection_dir, file)
                                             if os.path.isfile(file_path):
-                                                # 使用相对路径格式（相对于模型根目录）
-                                                relative_path = file
-                                                if 'vitpose' in file.lower() and relative_path not in available_vitpose:
-                                                    available_vitpose.append(relative_path)
-                                                if 'yolo' in file.lower() and relative_path not in available_yolo:
-                                                    available_yolo.append(relative_path)
+                                                # 尝试多种路径格式
+                                                path_formats = [
+                                                    f"{prefix}/{file}",  # 带前缀的路径
+                                                    file,  # 仅文件名
+                                                ]
+                                                for relative_path in path_formats:
+                                                    if 'vitpose' in file.lower() and relative_path not in available_vitpose:
+                                                        available_vitpose.append(relative_path)
+                                                    if 'yolo' in file.lower() and relative_path not in available_yolo:
+                                                        available_yolo.append(relative_path)
                             if available_vitpose or available_yolo:
                                 logger.info(f"从文件系统扫描到的模型: vitpose={available_vitpose}, yolo={available_yolo}")
             except Exception as e:
@@ -1530,29 +1537,39 @@ def handler(job):
                 available_yolo = []
                 # 尝试从文件系统扫描作为后备
                 try:
-                    detection_dirs = ["/ComfyUI/models/detection", "/ComfyUI/models/onnx"]
-                    for detection_dir in detection_dirs:
+                    detection_dirs = [
+                        ("/ComfyUI/models/detection", "detection"),
+                        ("/ComfyUI/models/onnx", "onnx")
+                    ]
+                    for detection_dir, prefix in detection_dirs:
                         if os.path.exists(detection_dir):
                             for file in os.listdir(detection_dir):
                                 if file.endswith('.onnx'):
                                     file_path = os.path.join(detection_dir, file)
                                     if os.path.isfile(file_path):
-                                        relative_path = file
-                                        if 'vitpose' in file.lower():
-                                            available_vitpose.append(relative_path)
-                                        if 'yolo' in file.lower():
-                                            available_yolo.append(relative_path)
+                                        # 尝试多种路径格式
+                                        path_formats = [
+                                            f"{prefix}/{file}",  # 带前缀的路径
+                                            file,  # 仅文件名
+                                        ]
+                                        for relative_path in path_formats:
+                                            if 'vitpose' in file.lower() and relative_path not in available_vitpose:
+                                                available_vitpose.append(relative_path)
+                                            if 'yolo' in file.lower() and relative_path not in available_yolo:
+                                                available_yolo.append(relative_path)
                     if available_vitpose or available_yolo:
                         logger.info(f"从文件系统扫描到的模型（后备）: vitpose={available_vitpose}, yolo={available_yolo}")
                 except Exception as scan_error:
                     logger.warning(f"文件系统扫描失败: {scan_error}")
             
-            # 尝试不同的路径格式
+            # 尝试不同的路径格式（按优先级排序）
             vitpose_candidates = [
+                "detection/vitpose_h_wholebody_model.onnx",  # detection 目录格式（ComfyUI 期望的格式）
                 "onnx/vitpose_h_wholebody_model.onnx",  # workflow 中的格式
                 "vitpose_h_wholebody_model.onnx",  # 直接文件名
             ]
             yolo_candidates = [
+                "detection/yolov10m.onnx",  # detection 目录格式（ComfyUI 期望的格式）
                 "onnx/yolov10m.onnx",  # workflow 中的格式
                 "yolov10m.onnx",  # 直接文件名
             ]
@@ -1576,24 +1593,37 @@ def handler(job):
             # 如果列表中没有，尝试文件系统
             if not vitpose_model:
                 for candidate in vitpose_candidates:
-                    file_name = candidate.replace('onnx/', '')
-                    full_path = f"/ComfyUI/models/onnx/{file_name}"
+                    # 提取文件名（移除所有路径前缀）
+                    file_name = candidate.split('/')[-1]
+                    # 检查所有可能的路径
                     detection_path = f"/ComfyUI/models/detection/{file_name}"
-                    # 检查两个可能的路径
-                    model_path = full_path if os.path.exists(full_path) else (detection_path if os.path.exists(detection_path) else None)
+                    onnx_path = f"/ComfyUI/models/onnx/{file_name}"
+                    model_path = None
+                    used_format = None
+                    
+                    # 优先检查 detection 目录（ComfyUI 期望的格式）
+                    if os.path.exists(detection_path):
+                        model_path = detection_path
+                        used_format = f"detection/{file_name}"
+                    elif os.path.exists(onnx_path):
+                        model_path = onnx_path
+                        used_format = candidate if 'detection' in candidate or 'onnx' in candidate else file_name
+                    
                     if model_path:
-                        # 如果可用列表为空，优先使用文件名（不带路径前缀）
+                        # 如果可用列表为空，优先使用 detection/ 格式
                         if not available_vitpose:
-                            vitpose_model = file_name
-                            logger.info(f"可用列表为空，找到 ViTPose 模型文件: {model_path}, 使用文件名: {vitpose_model}")
+                            vitpose_model = used_format if used_format else file_name
+                            logger.info(f"可用列表为空，找到 ViTPose 模型文件: {model_path}, 使用格式: {vitpose_model}")
+                        elif used_format in available_vitpose:
+                            vitpose_model = used_format
                         elif file_name in available_vitpose:
                             vitpose_model = file_name
                         elif any(file_name in m or m in file_name for m in available_vitpose):
-                            vitpose_model = next((m for m in available_vitpose if file_name in m or m in file_name), file_name)
+                            vitpose_model = next((m for m in available_vitpose if file_name in m or m in file_name), used_format)
                         else:
-                            # 如果不在列表中，尝试使用文件名格式
-                            vitpose_model = file_name
-                            logger.warning(f"模型不在可用列表中，尝试使用文件名格式: {vitpose_model}")
+                            # 如果不在列表中，优先使用 detection/ 格式
+                            vitpose_model = used_format if 'detection' in used_format else file_name
+                            logger.warning(f"模型不在可用列表中，尝试使用格式: {vitpose_model}")
                         break
             
             if available_yolo:
@@ -1608,54 +1638,73 @@ def handler(job):
             
             if not yolo_model:
                 for candidate in yolo_candidates:
-                    file_name = candidate.replace('onnx/', '')
-                    full_path = f"/ComfyUI/models/onnx/{file_name}"
+                    # 提取文件名（移除所有路径前缀）
+                    file_name = candidate.split('/')[-1]
+                    # 检查所有可能的路径
                     detection_path = f"/ComfyUI/models/detection/{file_name}"
-                    # 检查两个可能的路径
-                    model_path = full_path if os.path.exists(full_path) else (detection_path if os.path.exists(detection_path) else None)
+                    onnx_path = f"/ComfyUI/models/onnx/{file_name}"
+                    model_path = None
+                    used_format = None
+                    
+                    # 优先检查 detection 目录（ComfyUI 期望的格式）
+                    if os.path.exists(detection_path):
+                        model_path = detection_path
+                        used_format = f"detection/{file_name}"
+                    elif os.path.exists(onnx_path):
+                        model_path = onnx_path
+                        used_format = candidate if 'detection' in candidate or 'onnx' in candidate else file_name
+                    
                     if model_path:
-                        # 如果可用列表为空，优先使用文件名（不带路径前缀）
+                        # 如果可用列表为空，优先使用 detection/ 格式
                         if not available_yolo:
-                            yolo_model = file_name
-                            logger.info(f"可用列表为空，找到 YOLO 模型文件: {model_path}, 使用文件名: {yolo_model}")
+                            yolo_model = used_format if used_format else file_name
+                            logger.info(f"可用列表为空，找到 YOLO 模型文件: {model_path}, 使用格式: {yolo_model}")
+                        elif used_format in available_yolo:
+                            yolo_model = used_format
                         elif file_name in available_yolo:
                             yolo_model = file_name
                         elif any(file_name in m or m in file_name for m in available_yolo):
-                            yolo_model = next((m for m in available_yolo if file_name in m or m in file_name), file_name)
+                            yolo_model = next((m for m in available_yolo if file_name in m or m in file_name), used_format)
                         else:
-                            # 如果不在列表中，尝试使用文件名格式
-                            yolo_model = file_name
-                            logger.warning(f"模型不在可用列表中，尝试使用文件名格式: {yolo_model}")
+                            # 如果不在列表中，优先使用 detection/ 格式
+                            yolo_model = used_format if 'detection' in used_format else file_name
+                            logger.warning(f"模型不在可用列表中，尝试使用格式: {yolo_model}")
                         break
             
-            # 如果找不到，使用可用列表中的第一个或默认文件名（不带路径前缀）
+            # 如果找不到，使用可用列表中的第一个或默认路径格式
             if not vitpose_model:
                 if available_vitpose:
                     vitpose_model = available_vitpose[0]
                     logger.info(f"使用可用列表中的第一个 ViTPose 模型: {vitpose_model}")
                 else:
-                    # 检查文件是否存在，使用文件名格式
+                    # 检查文件是否存在，优先使用 detection/ 格式
                     default_file = "vitpose_h_wholebody_model.onnx"
-                    if os.path.exists(f"/ComfyUI/models/onnx/{default_file}") or os.path.exists(f"/ComfyUI/models/detection/{default_file}"):
-                        vitpose_model = default_file
-                        logger.info(f"使用默认 ViTPose 模型文件名: {vitpose_model}")
+                    if os.path.exists(f"/ComfyUI/models/detection/{default_file}"):
+                        vitpose_model = f"detection/{default_file}"
+                        logger.info(f"使用默认 ViTPose 模型（detection格式）: {vitpose_model}")
+                    elif os.path.exists(f"/ComfyUI/models/onnx/{default_file}"):
+                        vitpose_model = f"detection/{default_file}"  # 即使文件在 onnx，也使用 detection/ 格式
+                        logger.info(f"使用默认 ViTPose 模型（detection格式）: {vitpose_model}")
                     else:
-                        vitpose_model = default_file
-                        logger.warning(f"ViTPose 模型文件不存在，使用默认文件名: {vitpose_model}")
+                        vitpose_model = f"detection/{default_file}"  # 默认使用 detection/ 格式
+                        logger.warning(f"ViTPose 模型文件不存在，使用默认格式: {vitpose_model}")
             
             if not yolo_model:
                 if available_yolo:
                     yolo_model = available_yolo[0]
                     logger.info(f"使用可用列表中的第一个 YOLO 模型: {yolo_model}")
                 else:
-                    # 检查文件是否存在，使用文件名格式
+                    # 检查文件是否存在，优先使用 detection/ 格式
                     default_file = "yolov10m.onnx"
-                    if os.path.exists(f"/ComfyUI/models/onnx/{default_file}") or os.path.exists(f"/ComfyUI/models/detection/{default_file}"):
-                        yolo_model = default_file
-                        logger.info(f"使用默认 YOLO 模型文件名: {yolo_model}")
+                    if os.path.exists(f"/ComfyUI/models/detection/{default_file}"):
+                        yolo_model = f"detection/{default_file}"
+                        logger.info(f"使用默认 YOLO 模型（detection格式）: {yolo_model}")
+                    elif os.path.exists(f"/ComfyUI/models/onnx/{default_file}"):
+                        yolo_model = f"detection/{default_file}"  # 即使文件在 onnx，也使用 detection/ 格式
+                        logger.info(f"使用默认 YOLO 模型（detection格式）: {yolo_model}")
                     else:
-                        yolo_model = default_file
-                        logger.warning(f"YOLO 模型文件不存在，使用默认文件名: {yolo_model}")
+                        yolo_model = f"detection/{default_file}"  # 默认使用 detection/ 格式
+                        logger.warning(f"YOLO 模型文件不存在，使用默认格式: {yolo_model}")
             
             if "widgets_values" in prompt["129"]:
                 widgets = prompt["129"]["widgets_values"]
@@ -2087,6 +2136,18 @@ def handler(job):
             prompt["83"]["inputs"]["save_output"] = True
             logger.info(f"节点83 (VHS_VideoCombine): frame_rate={job_input.get('frame_rate', 24)}, filename_prefix={job_input.get('filename_prefix', 'WanVideoWrapper_SteadyDancer')}")
         
+        # 节点 117: VHS_VideoCombine (姿态检测视频 - 仅用于预览，不输出)
+        # 确保节点 117 不输出视频文件，只使用节点 83 的输出
+        if "117" in prompt:
+            if "widgets_values" in prompt["117"]:
+                widgets = prompt["117"]["widgets_values"]
+                if isinstance(widgets, dict):
+                    widgets["save_output"] = False
+            if "inputs" not in prompt["117"]:
+                prompt["117"]["inputs"] = {}
+            prompt["117"]["inputs"]["save_output"] = False
+            logger.info(f"节点117 (VHS_VideoCombine - 姿态视频): save_output=False (不输出文件，仅用于预览)")
+        
         # 节点 130: PoseDetectionOneToAllAnimation (姿态检测)
         if "130" in prompt:
             # 使用调整后的尺寸，确保与视频生成尺寸一致
@@ -2430,9 +2491,19 @@ def handler(job):
         videos = get_videos(ws, prompt, is_mega_model or use_steadydancer)
         ws.close()
 
-        # 이미지가 없는 경우 처리
+        # SteadyDancer workflow: 优先返回节点 83 的最终视频（而不是节点 117 的姿态视频）
+        if use_steadydancer:
+            # 优先返回节点 83 的视频（最终生成的跳舞视频）
+            if "83" in videos and videos["83"]:
+                logger.info("✅ 返回节点 83 的最终生成视频（跳舞视频）")
+                return {"video": videos["83"][0]}
+            # 如果节点 83 没有视频，记录警告并尝试其他节点
+            logger.warning("⚠️ 节点 83 没有视频输出，尝试其他节点")
+        
+        # 对于其他 workflow 或 SteadyDancer 的备用方案，返回第一个找到的视频
         for node_id in videos:
             if videos[node_id]:
+                logger.info(f"返回节点 {node_id} 的视频")
                 return {"video": videos[node_id][0]}
         
         return {"error": "비디오를를 찾을 수 없습니다."}

@@ -63,6 +63,7 @@ RUN mkdir -p /ComfyUI/models/diffusion_models \
              /ComfyUI/models/text_encoders \
              /ComfyUI/models/vae \
              /ComfyUI/models/onnx \
+             /ComfyUI/models/detection \
              /ComfyUI/models/loras \
              /ComfyUI/input \
              /ComfyUI/output \
@@ -122,6 +123,18 @@ RUN hfd.sh Wan-AI/Wan2.2-Animate-14B \
     mv /tmp/hfd_yolo/process_checkpoint/det/yolov10m.onnx /ComfyUI/models/onnx/ && \
     rm -rf /tmp/hfd_yolo
 
+# Create detection directory with symlinks to onnx models for ComfyUI compatibility
+RUN mkdir -p /ComfyUI/models/detection && \
+    if [ -d /ComfyUI/models/onnx ]; then \
+        for file in /ComfyUI/models/onnx/*.onnx /ComfyUI/models/onnx/*.bin; do \
+            if [ -f "$file" ]; then \
+                ln -sf "$file" "/ComfyUI/models/detection/$(basename "$file")"; \
+            fi; \
+        done 2>/dev/null || true; \
+    fi && \
+    echo "✓ Detection directory symlinks created" && \
+    ls -la /ComfyUI/models/detection/ 2>/dev/null || echo "WARNING: Detection directory is empty"
+
 # Download LoRA model for SteadyDancer workflow
 # LoRA model: lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors
 # Note: loras directory is already created above
@@ -168,6 +181,9 @@ RUN mkdir -p /workflows && \
     test -f /ComfyUI/models/onnx/vitpose_h_wholebody_model.onnx && echo "✓ ViTPose model found" || (echo "ERROR: ViTPose model not found" && exit 1) && \
     test -f /ComfyUI/models/onnx/vitpose_h_wholebody_data.bin && echo "✓ ViTPose data file found" || (echo "ERROR: ViTPose data file not found" && exit 1) && \
     test -f /ComfyUI/models/onnx/yolov10m.onnx && echo "✓ YOLO model found" || (echo "ERROR: YOLO model not found" && exit 1) && \
+    # 验证 detection 目录的符号链接
+    test -L /ComfyUI/models/detection/vitpose_h_wholebody_model.onnx && echo "✓ ViTPose symlink in detection directory" || echo "WARNING: ViTPose symlink not found in detection directory" && \
+    test -L /ComfyUI/models/detection/yolov10m.onnx && echo "✓ YOLO symlink in detection directory" || echo "WARNING: YOLO symlink not found in detection directory" && \
     test -f /ComfyUI/models/loras/WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors && echo "✓ LoRA model found" || (echo "ERROR: LoRA model not found" && exit 1) && \
     echo "✓ All required model files verified"
 

@@ -12,4 +12,6 @@ comfyui:
     vae: models/vae/
     # Text encoders
     embeddings: models/text_encoders/
-
+    # Detection models (ONNX models for pose detection)
+    # Point to onnx directory since models are stored there
+    detection: models/onnx/
