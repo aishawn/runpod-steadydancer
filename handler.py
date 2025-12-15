@@ -181,6 +181,31 @@ def get_videos(ws, prompt, is_mega_model=False):
     history = get_history(prompt_id)[prompt_id]
     execution_history = history  # 保存用于调试
     
+    # 立即输出执行历史的基本信息（用于调试）
+    logger.info("=" * 60)
+    logger.info("📋 执行历史基本信息:")
+    logger.info(f"   执行历史字段: {list(history.keys())}")
+    if 'outputs' in history:
+        output_nodes = list(history['outputs'].keys())
+        logger.info(f"   输出节点数量: {len(output_nodes)}")
+        logger.info(f"   输出节点列表: {sorted(output_nodes, key=lambda x: int(x) if x.isdigit() else 999)}")
+        
+        # 检查关键节点是否在执行历史中
+        key_nodes = ["28", "79", "115", "83", "117", "91"]
+        logger.info("   关键节点执行状态:")
+        for key_node in key_nodes:
+            if key_node in output_nodes:
+                node_output = history['outputs'][key_node]
+                output_keys = list(node_output.keys())
+                logger.info(f"     ✅ 节点 {key_node}: 已执行，输出字段 = {output_keys}")
+            else:
+                logger.error(f"     ❌ 节点 {key_node}: 未执行或不在输出中")
+    else:
+        logger.warning("   ⚠️ 执行历史中没有 'outputs' 字段")
+    if 'error' in history:
+        logger.error(f"   ❌ 执行历史中有错误信息: {history['error']}")
+    logger.info("=" * 60)
+    
     # 检查是否有错误信息
     if 'error' in history:
         error_info = history['error']
@@ -208,9 +233,17 @@ def get_videos(ws, prompt, is_mega_model=False):
             raise Exception(f"ComfyUI execution error: {error_info}")
         raise Exception("No outputs found in execution history")
     
+    # 首先输出所有输出节点的基本信息
+    logger.info(f"📊 开始处理 {len(history['outputs'])} 个输出节点...")
+    
     for node_id in history['outputs']:
         node_output = history['outputs'][node_id]
         videos_output = []
+        
+        # 输出节点基本信息（特别是关键节点）
+        if node_id in ["28", "79", "115", "83", "117", "91"]:
+            output_keys = list(node_output.keys())
+            logger.info(f"🔍 处理节点 {node_id}: 输出字段 = {output_keys}")
         
         # SteadyDancer workflow: 完全跳过节点 117 的输出（即使它生成了文件）
         if node_id == "117":
@@ -222,8 +255,15 @@ def get_videos(ws, prompt, is_mega_model=False):
         video_list = None
         if 'gifs' in node_output:
             video_list = node_output['gifs']
+            if node_id in ["28", "79", "115", "83", "117", "91"]:
+                logger.info(f"   节点 {node_id}: 找到 'gifs' 字段，数量: {len(video_list) if video_list else 0}")
         elif 'videos' in node_output:
             video_list = node_output['videos']
+            if node_id in ["28", "79", "115", "83", "117", "91"]:
+                logger.info(f"   节点 {node_id}: 找到 'videos' 字段，数量: {len(video_list) if video_list else 0}")
+        else:
+            if node_id in ["28", "79", "115", "83", "117", "91"]:
+                logger.info(f"   节点 {node_id}: 没有 'gifs' 或 'videos' 字段")
         
         if video_list:
             for video in video_list:
