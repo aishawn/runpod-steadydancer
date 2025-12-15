@@ -2162,7 +2162,20 @@ def handler(job):
                     prompt["119"]["inputs"]["riflex_freq_index"] = int(prompt["119"]["inputs"]["riflex_freq_index"])
                 except (ValueError, TypeError):
                     prompt["119"]["inputs"]["riflex_freq_index"] = 0
+            # 验证节点 119 的关键输入是否都已设置
+            required_inputs_119 = ["steps", "cfg", "shift", "seed", "scheduler", "image_embeds"]
+            missing_inputs_119 = []
+            for input_name in required_inputs_119:
+                if input_name not in prompt["119"]["inputs"] or prompt["119"]["inputs"][input_name] is None:
+                    missing_inputs_119.append(input_name)
+            
+            if missing_inputs_119:
+                logger.error(f"❌ 节点119: 缺少必需的输入: {missing_inputs_119}")
+            else:
+                logger.info(f"✅ 节点119: 所有必需输入都已设置")
+            
             logger.info(f"节点119 (WanVideoSamplerSettings): steps={steps}, cfg={cfg}, shift={shift}, seed={seed}, scheduler={prompt['119']['inputs'].get('scheduler')}, image_embeds={prompt['119']['inputs'].get('image_embeds')}, rope_function={prompt['119']['inputs'].get('rope_function', 'comfy')}")
+            logger.info(f"   节点119 输出: sampler_inputs (SAMPLER_ARGS) - 应该连接到节点 118")
         
         # 节点 118: WanVideoSamplerFromSettings (从设置采样)
         # 节点 118 的输入 sampler_inputs 来自节点 119 的输出
@@ -2180,6 +2193,21 @@ def handler(job):
                     logger.error(f"❌ 节点118: 缺少 sampler_inputs 输入，且节点 119 不存在，节点 118 无法执行")
             else:
                 logger.info(f"✅ 节点118 (WanVideoSamplerFromSettings): sampler_inputs={sampler_inputs}")
+            
+            # 验证节点 118 的输入连接
+            if "sampler_inputs" in prompt["118"]["inputs"]:
+                sampler_inputs_value = prompt["118"]["inputs"]["sampler_inputs"]
+                if isinstance(sampler_inputs_value, list) and len(sampler_inputs_value) == 2:
+                    source_node = sampler_inputs_value[0]
+                    source_output = sampler_inputs_value[1]
+                    if source_node == "119" and source_output == 0:
+                        logger.info(f"✅ 节点118: sampler_inputs 正确连接到节点 119 的输出 0")
+                    else:
+                        logger.warning(f"⚠️ 节点118: sampler_inputs 连接到节点 {source_node} 的输出 {source_output}，可能不正确")
+                else:
+                    logger.error(f"❌ 节点118: sampler_inputs 格式错误: {sampler_inputs_value}")
+            else:
+                logger.error(f"❌ 节点118: 缺少 sampler_inputs 输入")
         
         # 节点 122: WanVideoScheduler (调度器)
         if "122" in prompt:
