@@ -2150,6 +2150,30 @@ def handler(job):
                 prompt["124"]["inputs"] = {}
             prompt["124"]["inputs"]["seed"] = seed
         
+        # 节点 115: ImageConcatMulti (合并生成图像和预览图像) - 确保输入连接正确
+        # 节点 115 的输出连接到节点 83，如果节点 115 没有执行，节点 83 也无法执行
+        if "115" in prompt:
+            if "inputs" not in prompt["115"]:
+                prompt["115"]["inputs"] = {}
+            
+            # image_1 来自节点 28 (WanVideoDecode) - 生成的图像
+            if "image_1" not in prompt["115"]["inputs"] or prompt["115"]["inputs"]["image_1"] is None:
+                if "28" in prompt:
+                    prompt["115"]["inputs"]["image_1"] = ["28", 0]
+                    logger.info(f"🔧 节点115: 修复 image_1 输入 = ['28', 0]")
+                else:
+                    logger.error(f"❌ 节点115: 缺少 image_1 输入（来自节点 28），节点 115 无法执行")
+            
+            # image_2 来自节点 79 (ImageConcatMulti) - 预览图像
+            if "image_2" not in prompt["115"]["inputs"] or prompt["115"]["inputs"]["image_2"] is None:
+                if "79" in prompt:
+                    prompt["115"]["inputs"]["image_2"] = ["79", 0]
+                    logger.info(f"🔧 节点115: 修复 image_2 输入 = ['79', 0]")
+                else:
+                    logger.warning(f"⚠️ 节点115: 缺少 image_2 输入（来自节点 79），可能影响输出")
+            
+            logger.info(f"✅ 节点115 (ImageConcatMulti): image_1={prompt['115']['inputs'].get('image_1')}, image_2={prompt['115']['inputs'].get('image_2')}")
+        
         # 节点 83: VHS_VideoCombine (输出视频 - 最终的跳舞视频)
         if "83" in prompt:
             frame_rate = job_input.get("frame_rate", 24)
@@ -2180,7 +2204,7 @@ def handler(job):
                     prompt["83"]["inputs"]["images"] = ["115", 0]
                     logger.info(f"🔧 节点83: 修复 images 输入 = ['115', 0]")
                 else:
-                    logger.error(f"❌ 节点83: 缺少 images 输入，且节点 115 不存在")
+                    logger.error(f"❌ 节点83: 缺少 images 输入，且节点 115 不存在，节点 83 无法执行")
             
             logger.info(f"✅ 节点83 (VHS_VideoCombine - 最终视频): frame_rate={frame_rate}, filename_prefix={filename_prefix}, format={video_format}, save_output=True")
             logger.info(f"   images 输入: {prompt['83']['inputs'].get('images')}")
@@ -2555,26 +2579,102 @@ def handler(job):
             video_count = len(videos[node_id]) if videos[node_id] else 0
             logger.info(f"  节点 {node_id}: {video_count} 个视频")
         
-        # 检查执行历史中节点 83 的详细信息
-        if execution_history and 'outputs' in execution_history:
-            logger.info(f"📋 执行历史中的输出节点: {list(execution_history['outputs'].keys())}")
-            if "83" in execution_history['outputs']:
-                node83_output = execution_history['outputs']["83"]
-                logger.info(f"📊 节点 83 的输出信息: {list(node83_output.keys())}")
-                if 'videos' in node83_output:
-                    logger.info(f"📹 节点 83 的 videos 列表长度: {len(node83_output['videos'])}")
-                    for i, video in enumerate(node83_output['videos']):
-                        video_path = video.get('fullpath', video.get('filename', 'N/A'))
-                        video_type = video.get('type', 'unknown')
-                        logger.info(f"   视频 {i}: {video_path} (type: {video_type})")
-                        if video_path and os.path.exists(video_path):
-                            logger.info(f"     ✅ 文件存在")
-                        else:
-                            logger.warning(f"     ❌ 文件不存在")
+        # 检查执行历史中关键节点的详细信息
+        if execution_history:
+            logger.info(f"📋 执行历史存在，检查 outputs...")
+            if 'outputs' in execution_history:
+                all_output_nodes = list(execution_history['outputs'].keys())
+                logger.info(f"📋 执行历史中的输出节点 ({len(all_output_nodes)} 个): {all_output_nodes}")
+                
+                # 检查关键节点链：28 -> 79 -> 115 -> 83
+                key_nodes = ["28", "79", "115", "83"]
+                logger.info("=" * 60)
+                logger.info("关键节点执行状态检查:")
+                for node_id in key_nodes:
+                    if node_id in execution_history['outputs']:
+                        node_output = execution_history['outputs'][node_id]
+                        output_keys = list(node_output.keys())
+                        logger.info(f"✅ 节点 {node_id} 已执行，输出字段: {output_keys}")
+                        
+                        # 如果是图像节点，检查是否有 images 输出
+                        if 'images' in node_output:
+                            images = node_output['images']
+                            if isinstance(images, list):
+                                logger.info(f"   图像数量: {len(images)}")
+                            else:
+                                logger.info(f"   图像输出: {type(images).__name__}")
+                    else:
+                        logger.error(f"❌ 节点 {node_id} 未执行或不在输出中！")
+                        # 分析为什么这个节点没有执行
+                        if node_id == "83":
+                            logger.error("   → 节点 83 未执行，检查前置节点...")
+                            if "115" not in execution_history['outputs']:
+                                logger.error("     → 节点 115 未执行，导致节点 83 无法执行")
+                                if "28" not in execution_history['outputs']:
+                                    logger.error("       → 节点 28 未执行，导致节点 115 无法执行")
+                                if "79" not in execution_history['outputs']:
+                                    logger.error("       → 节点 79 未执行，导致节点 115 无法执行")
+                        elif node_id == "115":
+                            logger.error("   → 节点 115 未执行，检查前置节点...")
+                            if "28" not in execution_history['outputs']:
+                                logger.error("     → 节点 28 未执行")
+                            if "79" not in execution_history['outputs']:
+                                logger.error("     → 节点 79 未执行")
+                logger.info("=" * 60)
+                
+                # 详细检查节点 83
+                if "83" in execution_history['outputs']:
+                    node83_output = execution_history['outputs']["83"]
+                    logger.info(f"📊 节点 83 的输出信息: {list(node83_output.keys())}")
+                    if 'videos' in node83_output:
+                        videos_list = node83_output['videos']
+                        logger.info(f"📹 节点 83 的 videos 列表长度: {len(videos_list)}")
+                        for i, video in enumerate(videos_list):
+                            video_path = video.get('fullpath', video.get('filename', 'N/A'))
+                            video_type = video.get('type', 'unknown')
+                            save_output = video.get('save_output', 'unknown')
+                            subfolder = video.get('subfolder', '')
+                            logger.info(f"   视频 {i}: {video_path}")
+                            logger.info(f"     type: {video_type}, save_output: {save_output}, subfolder: {subfolder}")
+                            if video_path and isinstance(video_path, str):
+                                if os.path.exists(video_path):
+                                    file_size = os.path.getsize(video_path)
+                                    logger.info(f"     ✅ 文件存在，大小: {file_size} 字节")
+                                else:
+                                    logger.warning(f"     ❌ 文件不存在: {video_path}")
+                                    # 尝试查找可能的路径
+                                    possible_paths = [
+                                        f"/ComfyUI/output/{video_path}",
+                                        f"/ComfyUI/output/{subfolder}/{video_path}" if subfolder else None,
+                                        video_path.replace("temp", "output") if "temp" in video_path else None,
+                                    ]
+                                    for possible_path in possible_paths:
+                                        if possible_path and os.path.exists(possible_path):
+                                            logger.info(f"     ✅ 找到文件在备用路径: {possible_path}")
+                            else:
+                                logger.warning(f"     ❌ 视频路径无效: {video_path} (类型: {type(video_path).__name__})")
+                    else:
+                        logger.error("❌ 节点 83 的输出中没有 'videos' 字段")
+                        logger.error(f"   节点 83 的输出字段: {list(node83_output.keys())}")
+                        # 检查是否有 images 输出（可能节点 83 执行了但没有生成视频）
+                        if 'images' in node83_output:
+                            logger.warning("   ⚠️ 节点 83 有 images 输出但没有 videos，可能 save_output=False 或格式错误")
                 else:
-                    logger.error("❌ 节点 83 的输出中没有 'videos' 字段")
+                    logger.error("❌ 节点 83 不在执行历史的输出中！")
+                    logger.error("   可能原因：")
+                    logger.error("   1. 节点 83 的 images 输入连接错误（缺少节点 115 的输出）")
+                    logger.error("   2. 节点 115 未执行（因为节点 28 或节点 79 失败）")
+                    logger.error("   3. 节点 28 未执行（因为节点 118 或节点 38 失败）")
+                    logger.error("   4. 节点 118 未执行（因为节点 119 失败）")
+                    logger.error("   5. 节点 119 未执行（因为节点 71 或节点 78 失败）")
+                    logger.error("   6. 节点 71 未执行（因为节点 63、72 或 82 失败）")
             else:
-                logger.error("❌ 节点 83 不在执行历史的输出中！可能工作流执行失败或节点 83 未执行")
+                logger.error("❌ 执行历史中没有 'outputs' 字段！")
+                logger.error(f"   执行历史的字段: {list(execution_history.keys())}")
+                if 'error' in execution_history:
+                    logger.error(f"   执行错误: {execution_history['error']}")
+        else:
+            logger.error("❌ 执行历史为空！")
 
         # SteadyDancer workflow: 只返回节点 83 的最终视频，如果没有则报错，绝不返回节点 117
         if use_steadydancer:
