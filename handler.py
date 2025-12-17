@@ -934,6 +934,18 @@ def handler(job):
                                     has_link = "link" in input_item and input_item["link"] is not None
                                     
                                     if has_link:
+                                        # CRITICAL: 对于 SteadyDancer workflow 的节点 77，阻止 width 和 height 的链接解析
+                                        # 这些值必须使用调整后的尺寸，而不是从节点 91 获取的原始视频尺寸
+                                        if use_steadydancer and node_id == "77" and input_name in ["width", "height"]:
+                                            # 跳过链接解析，使用占位符值，稍后会在计算调整后的尺寸后覆盖
+                                            # 使用一个特殊标记，以便后续识别和覆盖
+                                            converted_inputs[input_name] = "__STEADYDANCER_ADJUSTED__"
+                                            logger.info(f"节点{node_id}.{input_name}: 跳过链接解析（SteadyDancer workflow，标记为待调整）")
+                                            # 跳过 widget 索引递增
+                                            if not widgets_values_is_dict and has_widget and widget_index < len(widgets_values):
+                                                widget_index += 1
+                                            continue
+                                        
                                         # 如果有 link，转换为 [node_id, output_index] 格式
                                         link_id = input_item["link"]
                                         if link_id in links_map:
@@ -1269,12 +1281,19 @@ def handler(job):
     if use_steadydancer and "77" in prompt:
         if "inputs" not in prompt["77"]:
             prompt["77"]["inputs"] = {}
-        # 强制覆盖，无论之前是否有链接
+        # 强制覆盖，无论之前是否有链接或占位符
         old_width_77 = prompt["77"]["inputs"].get("width")
         old_height_77 = prompt["77"]["inputs"].get("height")
+        # 检查是否是占位符或链接值
+        is_placeholder_width = old_width_77 == "__STEADYDANCER_ADJUSTED__" or isinstance(old_width_77, list)
+        is_placeholder_height = old_height_77 == "__STEADYDANCER_ADJUSTED__" or isinstance(old_height_77, list)
+        if is_placeholder_width:
+            logger.info(f"🔧 节点77: 替换占位符/链接值 width={old_width_77} -> {adjusted_width}")
+        if is_placeholder_height:
+            logger.info(f"🔧 节点77: 替换占位符/链接值 height={old_height_77} -> {adjusted_height}")
         prompt["77"]["inputs"]["width"] = adjusted_width
         prompt["77"]["inputs"]["height"] = adjusted_height
-        logger.info(f"🔧 节点77 (尺寸计算后立即覆盖): width={old_width_77} -> {adjusted_width}, height={old_height_77} -> {adjusted_height}")
+        logger.info(f"✅ 节点77 (尺寸计算后立即覆盖): width={adjusted_width}, height={adjusted_height}")
     
     if is_mega_model:
         # RapidAIO Mega (V2.5).json workflow 节点配置
@@ -2403,7 +2422,16 @@ def handler(job):
                 else:
                     logger.error(f"❌ 节点79: 缺少 image_2 输入（来自节点 77/113），节点 79 无法执行")
             
-            logger.info(f"✅ 节点79 (ImageConcatMulti): image_1={prompt['79']['inputs'].get('image_1')}, image_2={prompt['79']['inputs'].get('image_2')}")
+            # CRITICAL: 设置 match_image_size=True，允许自动调整图像尺寸
+            # 如果设置为 False，节点 79 会要求两个输入图像必须有相同的尺寸，否则会报错
+            if "widgets_values" in prompt["79"]:
+                widgets = prompt["79"]["widgets_values"]
+                if isinstance(widgets, list) and len(widgets) > 2:
+                    old_match_value = widgets[2]
+                    widgets[2] = True  # match_image_size=True
+                    logger.info(f"🔧 节点79: match_image_size 从 {old_match_value} 修改为 True")
+            
+            logger.info(f"✅ 节点79 (ImageConcatMulti): image_1={prompt['79']['inputs'].get('image_1')}, image_2={prompt['79']['inputs'].get('image_2')}, match_image_size=True")
         
         # 节点 115: ImageConcatMulti (合并生成图像和预览图像) - 确保输入连接正确
         # 节点 115 的输出连接到节点 83，如果节点 115 没有执行，节点 83 也无法执行
