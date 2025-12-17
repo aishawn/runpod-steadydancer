@@ -1264,6 +1264,18 @@ def handler(job):
     if adjusted_height != original_height:
         logger.info(f"Height adjusted to nearest multiple of 16: {original_height} -> {adjusted_height}")
     
+    # CRITICAL: 对于 SteadyDancer workflow，在计算调整后的尺寸后立即覆盖节点 77 的 width 和 height
+    # 这必须在所有 workflow 转换和链接解析之后执行，确保节点 77 使用调整后的尺寸而不是从节点 91 获取的原始视频尺寸
+    if use_steadydancer and "77" in prompt:
+        if "inputs" not in prompt["77"]:
+            prompt["77"]["inputs"] = {}
+        # 强制覆盖，无论之前是否有链接
+        old_width_77 = prompt["77"]["inputs"].get("width")
+        old_height_77 = prompt["77"]["inputs"].get("height")
+        prompt["77"]["inputs"]["width"] = adjusted_width
+        prompt["77"]["inputs"]["height"] = adjusted_height
+        logger.info(f"🔧 节点77 (尺寸计算后立即覆盖): width={old_width_77} -> {adjusted_width}, height={old_height_77} -> {adjusted_height}")
+    
     if is_mega_model:
         # RapidAIO Mega (V2.5).json workflow 节点配置
         # V2.5 使用不同的节点结构，需要适配新的节点 ID
@@ -2501,6 +2513,34 @@ def handler(job):
             prompt["130"]["inputs"]["draw_face_points"] = draw_face_points
             prompt["130"]["inputs"]["draw_head"] = draw_head
             logger.info(f"节点130 (PoseDetectionOneToAllAnimation): width={pose_width}, height={pose_height}, align_to={align_to}, draw_face_points={draw_face_points}, draw_head={draw_head}")
+        
+        # CRITICAL: 在所有节点配置完成后，最后强制覆盖节点 77 的 width 和 height
+        # 确保使用调整后的尺寸，而不是从节点 91 获取的原始视频尺寸
+        # 这必须在所有 workflow 转换和节点配置完成后执行，以确保覆盖任何链接解析的结果
+        if "77" in prompt:
+            if "inputs" not in prompt["77"]:
+                prompt["77"]["inputs"] = {}
+            # 强制覆盖，无论之前是否有链接（即使是链接值也要覆盖）
+            # 删除任何可能存在的链接，直接使用数值
+            if "width" in prompt["77"]["inputs"]:
+                old_width = prompt["77"]["inputs"]["width"]
+                logger.info(f"🔧 节点77: 覆盖 width 从 {old_width} 到 {adjusted_width}")
+            if "height" in prompt["77"]["inputs"]:
+                old_height = prompt["77"]["inputs"]["height"]
+                logger.info(f"🔧 节点77: 覆盖 height 从 {old_height} 到 {adjusted_height}")
+            prompt["77"]["inputs"]["width"] = adjusted_width
+            prompt["77"]["inputs"]["height"] = adjusted_height
+            # 验证覆盖是否成功（确保不是链接值）
+            final_width = prompt["77"]["inputs"].get("width")
+            final_height = prompt["77"]["inputs"].get("height")
+            if isinstance(final_width, list) or isinstance(final_height, list):
+                logger.error(f"❌ 节点77: 覆盖失败！width={final_width}, height={final_height} 仍然是链接值")
+                # 强制再次覆盖
+                prompt["77"]["inputs"]["width"] = adjusted_width
+                prompt["77"]["inputs"]["height"] = adjusted_height
+                logger.info(f"🔧 节点77: 强制再次覆盖为数值")
+            else:
+                logger.info(f"✅ 节点77 (最终覆盖): width={final_width}, height={final_height} (确保与节点68尺寸一致，已验证为数值)")
     else:
         # 标准 workflow (new_Wan22_api.json) 节点配置
         prompt["244"]["inputs"]["image"] = image_path
