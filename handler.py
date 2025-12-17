@@ -152,6 +152,7 @@ def get_videos(ws, prompt, is_mega_model=False):
     output_videos = {}
     error_info = None
     execution_history = None  # 保存执行历史用于调试
+    node_errors = {}  # 保存每个节点的错误信息 {node_id: error_data}
     
     while True:
         out = ws.recv()
@@ -172,13 +173,22 @@ def get_videos(ws, prompt, is_mega_model=False):
                 error_info = error_data.get('error', 'Unknown execution error')
                 error_type = error_data.get('type', '')
                 node_id = error_data.get('node_id', '')
+                exception_message = error_data.get('exception_message', '')
+                
+                # 保存节点错误信息
+                if node_id:
+                    node_errors[node_id] = {
+                        'error': error_info,
+                        'type': error_type,
+                        'exception_message': exception_message,
+                        'full_data': error_data
+                    }
                 
                 # 输出完整的错误信息（用于调试）
                 logger.error("=" * 60)
                 logger.error(f"❌ 执行错误 - 节点: {node_id}")
                 logger.error(f"   错误类型: {error_type}")
                 logger.error(f"   错误信息: {error_info}")
-                logger.error(f"   完整错误数据: {error_data}")
                 
                 # 检查是否是 OOM 错误
                 if 'OutOfMemoryError' in str(error_info) or 'OOM' in str(error_info):
@@ -187,14 +197,37 @@ def get_videos(ws, prompt, is_mega_model=False):
                     logger.error("     1. 减小图像分辨率 (width/height)")
                     logger.error("     2. 减少帧数 (length)")
                     logger.error("     3. 缩短提示词长度")
+                # 检查是否是参数冲突错误
+                elif 'got multiple values for keyword argument' in str(exception_message) or 'got multiple values for keyword argument' in str(error_info):
+                    keyword_arg = 'is_uncond' if 'is_uncond' in str(exception_message) else 'unknown'
+                    logger.error(f"   错误类型: 参数冲突 ('{keyword_arg}' 被重复传递)")
+                    logger.error("   建议解决方案:")
+                    logger.error(f"     1. Workflow 配置与当前模型版本不兼容")
+                    logger.error(f"     2. 检查 ComfyUI 和 WanVideoWrapper 是否为最新版本")
+                    logger.error(f"     3. 尝试重新生成或更新 workflow JSON 文件")
+                    logger.error(f"     4. 检查节点 {node_id} 的参数配置是否正确")
+                # 检查是否是类型错误
+                elif error_type == 'TypeError' or 'TypeError' in str(exception_message):
+                    logger.error(f"   错误类型: 类型错误 (TypeError)")
+                    logger.error("   建议解决方案:")
+                    logger.error(f"     1. 检查节点 {node_id} 的输入类型是否匹配")
+                    logger.error(f"     2. 检查前置节点的输出格式是否正确")
+                    logger.error(f"     3. 验证 workflow 文件的完整性")
                 else:
                     logger.error(f"   错误类型: 执行错误")
                     logger.error(f"   建议: 检查节点 {node_id} 的输入连接和配置")
+                
+                # 仅在调试模式下输出完整错误数据
+                if os.getenv('DEBUG', 'false').lower() == 'true':
+                    logger.error(f"   完整错误数据: {error_data}")
                 logger.error("=" * 60)
         else:
             continue
 
     history = get_history(prompt_id)[prompt_id]
+    # 将节点错误信息添加到执行历史中
+    if node_errors:
+        history['_node_errors'] = node_errors
     execution_history = history  # 保存用于调试
     
     # 立即输出执行历史的基本信息（用于调试）
@@ -209,13 +242,26 @@ def get_videos(ws, prompt, is_mega_model=False):
         # 检查关键节点是否在执行历史中（包括节点链：119 -> 118 -> 28 -> 79 -> 115 -> 83）
         key_nodes = ["119", "118", "28", "79", "115", "83", "117", "91", "71", "63", "72", "82"]
         logger.info("   关键节点执行状态:")
+        node_errors = history.get('_node_errors', {})
         for key_node in key_nodes:
             if key_node in output_nodes:
                 node_output = history['outputs'][key_node]
                 output_keys = list(node_output.keys())
                 logger.info(f"     ✅ 节点 {key_node}: 已执行，输出字段 = {output_keys}")
             else:
-                logger.error(f"     ❌ 节点 {key_node}: 未执行或不在输出中")
+                # 检查是否有该节点的错误信息
+                if key_node in node_errors:
+                    error_info = node_errors[key_node]
+                    error_type = error_info.get('type', 'Unknown')
+                    logger.error(f"     ❌ 节点 {key_node}: 执行失败 ({error_type})")
+                    # 对于关键节点（118），显示更详细的错误信息
+                    if key_node == "118":
+                        exception_msg = error_info.get('exception_message', '')
+                        if 'is_uncond' in str(exception_msg):
+                            logger.error(f"        ⚠️ 版本兼容性问题: 'is_uncond' 参数冲突")
+                            logger.error(f"        → 这是导致后续节点无法执行的根本原因")
+                else:
+                    logger.error(f"     ❌ 节点 {key_node}: 未执行或不在输出中")
         
         # 检查所有执行过的节点，找出哪些节点执行了但不在关键节点列表中
         all_executed_nodes = set(output_nodes)
@@ -232,23 +278,47 @@ def get_videos(ws, prompt, is_mega_model=False):
     # 检查是否有错误信息
     if 'error' in history:
         error_info = history['error']
+        error_message = error_info
         if isinstance(error_info, dict):
-            error_info = error_info.get('message', str(error_info))
+            error_message = error_info.get('message', str(error_info))
+            exception_message = error_info.get('exception_message', '')
+        else:
+            exception_message = str(error_info)
         
         # 检查是否是 OOM 错误
-        error_str = str(error_info)
+        error_str = str(error_message)
         if 'OutOfMemoryError' in error_str or 'OOM' in error_str or 'allocation' in error_str.lower():
             logger.error(f"❌ GPU 内存不足 (OOM) 错误")
-            logger.error(f"错误详情: {error_info}")
+            logger.error(f"错误详情: {error_message}")
             logger.error("建议解决方案:")
             logger.error("  1. 减小图像分辨率 (width/height) - 当前值可能过大")
             logger.error("  2. 减少视频帧数 (length) - 当前值可能过大")
             logger.error("  3. 缩短提示词长度 - 过长的提示词会消耗更多内存")
             logger.error("  4. 降低 batch_size (如果可配置)")
-            raise Exception(f"GPU 内存不足 (OOM): {error_info}. 请尝试减小分辨率、帧数或提示词长度。")
+            raise Exception(f"GPU 内存不足 (OOM): {error_message}. 请尝试减小分辨率、帧数或提示词长度。")
+        # 检查是否是参数冲突错误
+        elif 'got multiple values for keyword argument' in exception_message:
+            keyword_arg = 'is_uncond' if 'is_uncond' in exception_message else 'unknown'
+            logger.error(f"❌ 参数冲突错误: '{keyword_arg}' 被重复传递")
+            logger.error(f"错误详情: {exception_message[:200]}...")
+            logger.error("建议解决方案:")
+            logger.error("  1. Workflow 配置文件可能与当前 ComfyUI/模型版本不兼容")
+            logger.error("  2. 尝试更新 ComfyUI 和 ComfyUI-WanVideoWrapper 到最新版本")
+            logger.error("  3. 使用最新的 workflow JSON 配置文件")
+            logger.error("  4. 检查输入参数是否包含不支持的字段")
+            raise Exception(f"Workflow 配置不兼容: '{keyword_arg}' 参数冲突. 请更新 workflow 文件或 ComfyUI 版本。")
+        # 检查是否是类型错误
+        elif 'TypeError' in str(error_info):
+            logger.error(f"❌ 类型错误 (TypeError)")
+            logger.error(f"错误详情: {exception_message[:200] if exception_message else error_message}")
+            logger.error("建议解决方案:")
+            logger.error("  1. 检查输入数据的类型是否正确")
+            logger.error("  2. 验证 workflow 文件的完整性")
+            logger.error("  3. 确认所有模型文件已正确加载")
+            raise Exception(f"类型错误: {error_message}. 请检查输入参数类型。")
         else:
-            logger.error(f"Error in history: {error_info}")
-            raise Exception(f"ComfyUI execution error: {error_info}")
+            logger.error(f"❌ 执行错误: {error_message}")
+            raise Exception(f"ComfyUI execution error: {error_message}")
     
     # 检查 outputs 是否存在
     if 'outputs' not in history:
@@ -1454,15 +1524,15 @@ def handler(job):
         
         # 节点 22: WanVideoModelLoader (模型)
         if "22" in prompt:
-            # 查找 SteadyDancer 模型（支持 GGUF）
+            # 查找 SteadyDancer 模型（支持 safetensors quanto int8 和 GGUF 格式）
             model_name = None
             if available_models:
-                # 优先查找包含 "steadydancer" 的模型
+                # 优先查找包含 "steadydancer" 的模型（quanto int8 或 GGUF）
                 steadydancer_models = [m for m in available_models if "steadydancer" in m.lower()]
                 if steadydancer_models:
                     model_name = steadydancer_models[0]
                 else:
-                    # 如果没有找到，查找包含 "gguf" 的模型
+                    # 如果没有找到，查找包含 "gguf" 的模型（向后兼容）
                     gguf_models = [m for m in available_models if "gguf" in m.lower()]
                     if gguf_models:
                         model_name = gguf_models[0]
@@ -2070,12 +2140,11 @@ def handler(job):
                     widgets[1] = adjusted_height  # height
             if "inputs" not in prompt["77"]:
                 prompt["77"]["inputs"] = {}
-            # 如果width和height没有通过链接设置，使用调整后的值
-            if "width" not in prompt["77"]["inputs"] or prompt["77"]["inputs"]["width"] is None:
-                prompt["77"]["inputs"]["width"] = adjusted_width
-            if "height" not in prompt["77"]["inputs"] or prompt["77"]["inputs"]["height"] is None:
-                prompt["77"]["inputs"]["height"] = adjusted_height
-            logger.info(f"节点77 (ImageResizeKJv2): width={prompt['77']['inputs'].get('width')}, height={prompt['77']['inputs'].get('height')}")
+            # 强制覆盖width和height，使用调整后的值（与节点68保持一致）
+            # 不能使用从节点91获取的原始视频尺寸，否则会导致节点79尺寸不匹配错误
+            prompt["77"]["inputs"]["width"] = adjusted_width
+            prompt["77"]["inputs"]["height"] = adjusted_height
+            logger.info(f"节点77 (ImageResizeKJv2): width={adjusted_width}, height={adjusted_height} (强制使用调整后的尺寸，与节点68保持一致)")
         
         # 节点 87: WanVideoContextOptions (上下文选项)
         if "87" in prompt:
@@ -2257,6 +2326,63 @@ def handler(job):
             if "inputs" not in prompt["124"]:
                 prompt["124"]["inputs"] = {}
             prompt["124"]["inputs"]["seed"] = seed
+        
+        # 节点 28: WanVideoDecode (解码生成的视频) - 确保输入连接正确
+        # 节点 28 的输出连接到节点 115，如果节点 28 没有执行，节点 115 的 image_1 会缺失
+        if "28" in prompt:
+            if "inputs" not in prompt["28"]:
+                prompt["28"]["inputs"] = {}
+            
+            # vae 来自节点 109 (GetNode "VAE") -> 节点 108 (SetNode "VAE") -> 节点 38 (WanVideoVAELoader)
+            if "vae" not in prompt["28"]["inputs"] or prompt["28"]["inputs"]["vae"] is None:
+                # 尝试直接连接到节点 38
+                if "38" in prompt:
+                    prompt["28"]["inputs"]["vae"] = ["38", 0]
+                    logger.info(f"🔧 节点28: 修复 vae 输入 = ['38', 0] (跳过 GetNode/SetNode)")
+                else:
+                    logger.error(f"❌ 节点28: 缺少 vae 输入（来自节点 38），节点 28 无法执行")
+            
+            # samples 来自节点 118 (WanVideoSamplerFromSettings) 的输出
+            if "samples" not in prompt["28"]["inputs"] or prompt["28"]["inputs"]["samples"] is None:
+                if "118" in prompt:
+                    prompt["28"]["inputs"]["samples"] = ["118", 0]
+                    logger.info(f"🔧 节点28: 修复 samples 输入 = ['118', 0]")
+                else:
+                    logger.error(f"❌ 节点28: 缺少 samples 输入（来自节点 118），节点 28 无法执行")
+            
+            logger.info(f"✅ 节点28 (WanVideoDecode): vae={prompt['28']['inputs'].get('vae')}, samples={prompt['28']['inputs'].get('samples')}")
+        
+        # 节点 79: ImageConcatMulti (合并起始帧和姿态图像) - 确保输入连接正确
+        # 节点 79 的输出连接到节点 115，如果节点 79 没有执行，节点 115 的 image_2 会缺失
+        if "79" in prompt:
+            if "inputs" not in prompt["79"]:
+                prompt["79"]["inputs"] = {}
+            
+            # image_1 来自节点 97 (GetNode "start_frame") -> 节点 96 (SetNode "start_frame") -> 节点 68 (ImageResizeKJv2)
+            if "image_1" not in prompt["79"]["inputs"] or prompt["79"]["inputs"]["image_1"] is None:
+                # 尝试直接连接到节点 96 的源节点（节点 68）
+                if "68" in prompt:
+                    prompt["79"]["inputs"]["image_1"] = ["68", 0]
+                    logger.info(f"🔧 节点79: 修复 image_1 输入 = ['68', 0] (跳过 GetNode/SetNode)")
+                elif "96" in prompt:
+                    # 如果节点 68 不存在，尝试连接到节点 96 的源
+                    logger.warning(f"⚠️ 节点79: 节点 68 不存在，尝试查找节点 96 的源")
+                else:
+                    logger.error(f"❌ 节点79: 缺少 image_1 输入（来自节点 68/96），节点 79 无法执行")
+            
+            # image_2 来自节点 114 (GetNode "poses") -> 节点 113 (SetNode "poses") -> 节点 77 (ImageResizeKJv2)
+            if "image_2" not in prompt["79"]["inputs"] or prompt["79"]["inputs"]["image_2"] is None:
+                # 尝试直接连接到节点 113 的源节点（节点 77）
+                if "77" in prompt:
+                    prompt["79"]["inputs"]["image_2"] = ["77", 0]
+                    logger.info(f"🔧 节点79: 修复 image_2 输入 = ['77', 0] (跳过 GetNode/SetNode)")
+                elif "113" in prompt:
+                    # 如果节点 77 不存在，尝试连接到节点 113 的源
+                    logger.warning(f"⚠️ 节点79: 节点 77 不存在，尝试查找节点 113 的源")
+                else:
+                    logger.error(f"❌ 节点79: 缺少 image_2 输入（来自节点 77/113），节点 79 无法执行")
+            
+            logger.info(f"✅ 节点79 (ImageConcatMulti): image_1={prompt['79']['inputs'].get('image_1')}, image_2={prompt['79']['inputs'].get('image_2')}")
         
         # 节点 115: ImageConcatMulti (合并生成图像和预览图像) - 确保输入连接正确
         # 节点 115 的输出连接到节点 83，如果节点 115 没有执行，节点 83 也无法执行
@@ -2769,13 +2895,63 @@ def handler(job):
                             logger.warning("   ⚠️ 节点 83 有 images 输出但没有 videos，可能 save_output=False 或格式错误")
                 else:
                     logger.error("❌ 节点 83 不在执行历史的输出中！")
-                    logger.error("   可能原因：")
-                    logger.error("   1. 节点 83 的 images 输入连接错误（缺少节点 115 的输出）")
-                    logger.error("   2. 节点 115 未执行（因为节点 28 或节点 79 失败）")
-                    logger.error("   3. 节点 28 未执行（因为节点 118 或节点 38 失败）")
-                    logger.error("   4. 节点 118 未执行（因为节点 119 失败）")
-                    logger.error("   5. 节点 119 未执行（因为节点 71 或节点 78 失败）")
-                    logger.error("   6. 节点 71 未执行（因为节点 63、72 或 82 失败）")
+                    logger.error("   可能原因（按执行顺序分析）：")
+                    
+                    # 分析节点链依赖关系
+                    node_dependencies = {
+                        "83": ["115"],
+                        "115": ["28", "79"],
+                        "28": ["118", "38"],
+                        "118": ["119"],
+                        "119": ["71", "78"],
+                        "71": ["63", "72", "82"]
+                    }
+                    
+                    # 递归分析节点失败原因
+                    def analyze_node_failure(node_id, depth=0):
+                        indent = "     " * depth
+                        if node_id not in execution_history.get('outputs', {}):
+                            # 检查是否有该节点的错误信息
+                            node_errors = execution_history.get('_node_errors', {})
+                            if node_id in node_errors:
+                                error_info = node_errors[node_id]
+                                error_type = error_info.get('type', '')
+                                error_msg = error_info.get('error', '')
+                                exception_msg = error_info.get('exception_message', '')
+                                
+                                logger.error(f"{indent}→ 节点 {node_id} 未执行 ❌ 执行失败")
+                                logger.error(f"{indent}   错误类型: {error_type}")
+                                
+                                # 显示关键错误信息
+                                if exception_msg:
+                                    # 截取关键部分（避免过长）
+                                    short_msg = exception_msg[:150] + "..." if len(exception_msg) > 150 else exception_msg
+                                    logger.error(f"{indent}   错误详情: {short_msg}")
+                                elif error_msg:
+                                    short_msg = str(error_msg)[:150] + "..." if len(str(error_msg)) > 150 else str(error_msg)
+                                    logger.error(f"{indent}   错误信息: {short_msg}")
+                                
+                                # 如果是参数冲突错误，给出特殊提示
+                                if 'got multiple values for keyword argument' in str(exception_msg):
+                                    keyword_arg = 'is_uncond' if 'is_uncond' in str(exception_msg) else 'unknown'
+                                    logger.error(f"{indent}   ⚠️ 这是版本兼容性问题！'{keyword_arg}' 参数冲突")
+                                    logger.error(f"{indent}   解决方案: 更新 workflow JSON 或固定 ComfyUI/WanVideoWrapper 版本")
+                            else:
+                                logger.error(f"{indent}→ 节点 {node_id} 未执行（可能因前置节点失败）")
+                            
+                            # 继续分析依赖节点
+                            if node_id in node_dependencies:
+                                for dep in node_dependencies[node_id]:
+                                    analyze_node_failure(dep, depth + 1)
+                    
+                    analyze_node_failure("83")
+                    
+                    logger.error("")
+                    logger.error("   建议解决方案：")
+                    logger.error("   1. 检查 workflow JSON 文件是否与当前模型版本兼容")
+                    logger.error("   2. 确认所有必需的模型文件已正确加载")
+                    logger.error("   3. 查看上方的错误日志，定位具体失败的节点")
+                    logger.error("   4. 如果是参数冲突错误，尝试更新 ComfyUI 和相关插件")
             else:
                 logger.error("❌ 执行历史中没有 'outputs' 字段！")
                 logger.error(f"   执行历史的字段: {list(execution_history.keys())}")
@@ -2798,10 +2974,34 @@ def handler(job):
             # 检查是否有节点 117 的视频（用于错误提示）
             if "117" in videos and videos["117"]:
                 logger.error("❌ 检测到节点 117（姿态视频），但节点 83（最终视频）未生成")
-                return {"error": "视频生成失败：只生成了姿态检测视频（节点 117），没有生成最终的跳舞视频（节点 83）。可能原因：1) 节点 83 的 images 输入连接错误 2) 节点 83 的 save_output 未正确设置 3) 工作流执行过程中节点 83 未执行。请检查工作流配置和执行日志。"}
+                error_msg = (
+                    "视频生成失败：只生成了姿态检测视频（节点 117），没有生成最终的跳舞视频（节点 83）。\n\n"
+                    "可能原因：\n"
+                    "1. 节点 83 的 images 输入连接错误（缺少前置节点输出）\n"
+                    "2. 工作流执行过程中节点 83 未执行（检查前置节点 115、28、79 是否正常执行）\n"
+                    "3. 节点 83 的 save_output 参数未正确设置\n\n"
+                    "建议解决方案：\n"
+                    "• 检查 workflow JSON 文件的节点连接配置\n"
+                    "• 查看上方详细的节点执行状态日志\n"
+                    "• 确认所有必需的模型文件已正确加载"
+                )
+                return {"error": error_msg}
             else:
                 logger.error("❌ 节点 83 和节点 117 都没有视频输出")
-                return {"error": "视频生成失败：节点 83（最终视频）没有生成视频。可能原因：1) 工作流执行失败 2) 节点 83 的输入连接错误 3) 节点 83 未执行。请检查工作流执行日志。"}
+                error_msg = (
+                    "视频生成失败：节点 83（最终视频）和节点 117（姿态视频）都没有生成视频。\n\n"
+                    "可能原因：\n"
+                    "1. 工作流执行失败（检查是否有 TypeError 或参数冲突错误）\n"
+                    "2. 输入图片或视频格式不正确\n"
+                    "3. Workflow 配置文件与当前模型版本不兼容\n"
+                    "4. GPU 内存不足导致执行中断\n\n"
+                    "建议解决方案：\n"
+                    "• 查看上方的详细错误日志，特别是 TypeError 或参数冲突错误\n"
+                    "• 确认输入的图片和视频文件格式正确（支持 jpg/png/mp4）\n"
+                    "• 如果是参数冲突错误，尝试更新 ComfyUI 和 ComfyUI-WanVideoWrapper\n"
+                    "• 检查 GPU 内存是否充足"
+                )
+                return {"error": error_msg}
         
         # 对于其他 workflow，返回第一个找到的视频
         for node_id in videos:
