@@ -2130,7 +2130,7 @@ def handler(job):
         
         # 节点 77: ImageResizeKJv2 (姿态图像尺寸调整)
         # 注意：节点77的image输入来自节点130的输出，width和height来自GetNode
-        # 如果链接解析失败，这里设置默认值作为后备
+        # CRITICAL: 必须强制使用调整后的尺寸，与节点68保持一致，否则节点79会因尺寸不匹配而失败
         if "77" in prompt:
             if "widgets_values" in prompt["77"]:
                 widgets = prompt["77"]["widgets_values"]
@@ -2140,11 +2140,20 @@ def handler(job):
                     widgets[1] = adjusted_height  # height
             if "inputs" not in prompt["77"]:
                 prompt["77"]["inputs"] = {}
+            
+            # 确保 image 输入存在 (来自节点130的输出)
+            if "image" not in prompt["77"]["inputs"] or prompt["77"]["inputs"]["image"] is None:
+                if "130" in prompt:
+                    prompt["77"]["inputs"]["image"] = ["130", 0]
+                    logger.info(f"🔧 节点77: 修复 image 输入 = ['130', 0]")
+                else:
+                    logger.error(f"❌ 节点77: 缺少 image 输入（来自节点 130），节点 77 无法执行")
+            
             # 强制覆盖width和height，使用调整后的值（与节点68保持一致）
             # 不能使用从节点91获取的原始视频尺寸，否则会导致节点79尺寸不匹配错误
             prompt["77"]["inputs"]["width"] = adjusted_width
             prompt["77"]["inputs"]["height"] = adjusted_height
-            logger.info(f"节点77 (ImageResizeKJv2): width={adjusted_width}, height={adjusted_height} (强制使用调整后的尺寸，与节点68保持一致)")
+            logger.info(f"✅ 节点77 (ImageResizeKJv2): image={prompt['77']['inputs'].get('image')}, width={adjusted_width}, height={adjusted_height} (强制使用调整后的尺寸，与节点68保持一致)")
         
         # 节点 87: WanVideoContextOptions (上下文选项)
         if "87" in prompt:
