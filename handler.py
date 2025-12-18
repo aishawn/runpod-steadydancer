@@ -189,9 +189,21 @@ def get_videos(ws, prompt, is_mega_model=False):
                 logger.error(f"❌ 执行错误 - 节点: {node_id}")
                 logger.error(f"   错误类型: {error_type}")
                 logger.error(f"   错误信息: {error_info}")
+                if exception_message:
+                    logger.error(f"   异常详情: {exception_message}")
+                
+                # 对于节点 79 的特殊诊断
+                if node_id == "79":
+                    logger.error("   🔍 节点 79 (ImageConcatMulti) 错误诊断:")
+                    logger.error("      节点 79 用于合并起始帧和姿态图像")
+                    logger.error("      可能原因:")
+                    logger.error("      1. 节点 68 (起始帧) 或节点 77 (姿态图像) 未正确执行")
+                    logger.error("      2. 图像尺寸不匹配（即使设置了 match_image_size=True）")
+                    logger.error("      3. 输入图像格式不正确")
+                    logger.error("      4. match_image_size 参数未正确设置")
                 
                 # 检查是否是 OOM 错误
-                if 'OutOfMemoryError' in str(error_info) or 'OOM' in str(error_info):
+                if 'OutOfMemoryError' in str(error_info) or 'OOM' in str(error_info) or ('OutOfMemoryError' in str(exception_message) if exception_message else False):
                     logger.error("   错误类型: GPU 内存不足 (OOM)")
                     logger.error("   建议解决方案:")
                     logger.error("     1. 减小图像分辨率 (width/height)")
@@ -207,19 +219,25 @@ def get_videos(ws, prompt, is_mega_model=False):
                     logger.error(f"     3. 尝试重新生成或更新 workflow JSON 文件")
                     logger.error(f"     4. 检查节点 {node_id} 的参数配置是否正确")
                 # 检查是否是类型错误
-                elif error_type == 'TypeError' or 'TypeError' in str(exception_message):
+                elif error_type == 'TypeError' or 'TypeError' in str(exception_message) or 'TypeError' in str(error_info):
                     logger.error(f"   错误类型: 类型错误 (TypeError)")
                     logger.error("   建议解决方案:")
                     logger.error(f"     1. 检查节点 {node_id} 的输入类型是否匹配")
                     logger.error(f"     2. 检查前置节点的输出格式是否正确")
                     logger.error(f"     3. 验证 workflow 文件的完整性")
+                # 检查是否是属性错误（可能是输入缺失）
+                elif error_type == 'AttributeError' or 'AttributeError' in str(exception_message) or 'AttributeError' in str(error_info):
+                    logger.error(f"   错误类型: 属性错误 (AttributeError)")
+                    logger.error("   建议解决方案:")
+                    logger.error(f"     1. 检查节点 {node_id} 的输入是否完整")
+                    logger.error(f"     2. 检查前置节点是否正确执行并产生输出")
+                    logger.error(f"     3. 验证输入连接是否正确")
                 else:
                     logger.error(f"   错误类型: 执行错误")
                     logger.error(f"   建议: 检查节点 {node_id} 的输入连接和配置")
                 
-                # 仅在调试模式下输出完整错误数据
-                if os.getenv('DEBUG', 'false').lower() == 'true':
-                    logger.error(f"   完整错误数据: {error_data}")
+                # 输出完整错误数据（不再需要 DEBUG 模式）
+                logger.error(f"   完整错误数据: {json.dumps(error_data, indent=2, ensure_ascii=False)}")
                 logger.error("=" * 60)
         else:
             continue
@@ -2424,14 +2442,20 @@ def handler(job):
             
             # CRITICAL: 设置 match_image_size=True，允许自动调整图像尺寸
             # 如果设置为 False，节点 79 会要求两个输入图像必须有相同的尺寸，否则会报错
+            # 需要在 widgets_values 和 inputs 中都设置
             if "widgets_values" in prompt["79"]:
                 widgets = prompt["79"]["widgets_values"]
                 if isinstance(widgets, list) and len(widgets) > 2:
                     old_match_value = widgets[2]
                     widgets[2] = True  # match_image_size=True
-                    logger.info(f"🔧 节点79: match_image_size 从 {old_match_value} 修改为 True")
+                    logger.info(f"🔧 节点79: match_image_size (widgets_values) 从 {old_match_value} 修改为 True")
             
-            logger.info(f"✅ 节点79 (ImageConcatMulti): image_1={prompt['79']['inputs'].get('image_1')}, image_2={prompt['79']['inputs'].get('image_2')}, match_image_size=True")
+            # 确保在 inputs 中也设置 match_image_size
+            if "match_image_size" not in prompt["79"]["inputs"]:
+                prompt["79"]["inputs"]["match_image_size"] = True
+                logger.info(f"🔧 节点79: 在 inputs 中设置 match_image_size=True")
+            
+            logger.info(f"✅ 节点79 (ImageConcatMulti): image_1={prompt['79']['inputs'].get('image_1')}, image_2={prompt['79']['inputs'].get('image_2')}, match_image_size={prompt['79']['inputs'].get('match_image_size', True)}")
         
         # 节点 115: ImageConcatMulti (合并生成图像和预览图像) - 确保输入连接正确
         # 节点 115 的输出连接到节点 83，如果节点 115 没有执行，节点 83 也无法执行
